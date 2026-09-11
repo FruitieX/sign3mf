@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, ValueEnum};
-use sign3d::{
+use sign3mf::{
     color::parse_hex, color::parse_palette, convert_and_write, Config, Filter, Mode, PartsMode,
     TraceMode,
 };
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "sign3d",
+    name = "sign3mf",
     version,
     about = "Convert bitmap artwork into a multipart printable 3MF sign"
 )]

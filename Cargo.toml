@@ -1,16 +1,16 @@
 [package]
-name = "sign3d"
+name = "sign3mf"
 version = "0.1.0"
 edition = "2021"
 description = "Convert bitmap artwork into multipart printable 3MF signs"
 license = "MIT"
 
 [lib]
-name = "sign3d"
+name = "sign3mf"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sign3d"
+name = "sign3mf"
 path = "src/main.rs"
 
 [dependencies]

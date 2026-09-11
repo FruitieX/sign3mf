@@ -7,7 +7,7 @@ pub fn write_svg(path: &Path, parts: &[Part]) -> Result<()> {
     ensure_parent(path)?;
     let (w, h) = crate::mesh::bounds(parts);
     let mut s = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="{w:.4}mm" height="{h:.4}mm" viewBox="0 0 {w:.9} {h:.9}"><title>sign3d</title>"#
+        r#"<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="{w:.4}mm" height="{h:.4}mm" viewBox="0 0 {w:.9} {h:.9}"><title>sign3mf</title>"#
     );
     for part in parts {
         if part.is_backing {

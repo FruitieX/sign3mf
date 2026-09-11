@@ -1,6 +1,6 @@
-# sign3d
+# sign3mf
 
-`sign3d` converts prepared PNG, JPEG, WebP, BMP, or TIFF artwork into a flat,
+`sign3mf` converts prepared PNG, JPEG, WebP, BMP, or TIFF artwork into a flat,
 multipart 3MF sign. The library and command line program use millimetres (mm)
 for all physical dimensions. Transparent pixels are outside the sign; a requested
 background colour is flood-filled from the image border, so enclosed artwork of
@@ -10,8 +10,8 @@ Build and run from this directory:
 
 ```text
 cargo build --release
-sign3d --input warning.png --output warning.3mf --width 150
-sign3d --input warning.jpg --output warning.3mf --height 120 --mode backed --face-depth 1.0 --remove-background '#FFFFFF' --background-tolerance 20 --trim --upscale 4 --filter cubic --svg-out warning.svg
+sign3mf --input warning.png --output warning.3mf --width 150
+sign3mf --input warning.jpg --output warning.3mf --height 120 --mode backed --face-depth 1.0 --remove-background '#FFFFFF' --background-tolerance 20 --trim --upscale 4 --filter cubic --svg-out warning.svg
 ```
 
 Exactly one of `--width` and `--height` is required; both are measured in mm.

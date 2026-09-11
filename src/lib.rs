@@ -151,7 +151,7 @@ pub fn convert_and_write(config: &Config) -> Result<ConversionReport> {
     }
     let result = convert(config)?;
     let tmp_name = format!(
-        ".{}.sign3d.tmp",
+        ".{}.sign3mf.tmp",
         config
             .output
             .file_name()

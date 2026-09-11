@@ -79,7 +79,7 @@ fn model_xml(parts: &[Part]) -> String {
         }
         out.push_str("</triangles></mesh></object>");
     }
-    out.push_str(r#"<object id="1" type="model" name="sign3d"><components>"#);
+    out.push_str(r#"<object id="1" type="model" name="sign3mf"><components>"#);
     for i in 0..parts.len() {
         out.push_str(&format!(r#"<component objectid="{}"/>"#, i + 2));
     }
@@ -102,7 +102,7 @@ fn model_settings_xml(parts: &[Part]) -> String {
     }
 
     let mut out = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><config><object id=\"1\"><metadata key=\"name\" value=\"sign3d\"/>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><config><object id=\"1\"><metadata key=\"name\" value=\"sign3mf\"/>",
     );
     for (i, part) in parts.iter().enumerate() {
         out.push_str(&format!(
