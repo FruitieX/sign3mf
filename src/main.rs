@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use clap::{ArgAction, Parser, ValueEnum};
 use sign3mf::{
-    color::parse_hex, color::parse_palette, convert_and_write, Config, Filter, HolePosition, Mode,
-    PartsMode, TraceMode,
+    color::parse_hex, color::parse_palette, convert_and_write, Config, CountersinkSide, Filter,
+    HolePosition, HoleStyle, Mode, PartsMode, TraceMode,
 };
 use std::path::PathBuf;
 
@@ -61,6 +61,37 @@ struct Args {
         help = "Chamfer exterior edges and corners by this distance in millimetres (mm)."
     )]
     chamfer: f64,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = HoleStyleArg::Round,
+        help = "Screw-hole shape: round is a cylindrical through-hole; countersunk adds a tapered seat on the selected side."
+    )]
+    hole_style: HoleStyleArg,
+    #[arg(
+        long,
+        help = "Countersink opening diameter in millimetres (mm); defaults to the bore plus the configured countersink depth and angle."
+    )]
+    countersink_diameter: Option<f64>,
+    #[arg(
+        long,
+        default_value_t = 90.0,
+        help = "Included countersink angle in degrees."
+    )]
+    countersink_angle: f64,
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Countersink depth in millimetres (mm) when --countersink-diameter is omitted."
+    )]
+    countersink_depth: f64,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = CountersinkSideArg::Back,
+        help = "Countersink side: front is the artwork face; back is the backing face."
+    )]
+    countersink_side: CountersinkSideArg,
     #[arg(
         long,
         default_value_t = 5.0,
@@ -147,6 +178,16 @@ enum HoleArg {
     CenterBottom,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum HoleStyleArg {
+    Round,
+    Countersunk,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CountersinkSideArg {
+    Front,
+    Back,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum FilterArg {
     Nearest,
     Cubic,
@@ -188,6 +229,17 @@ fn main() -> Result<()> {
         face_depth: args.face_depth,
         corner_radius: args.corner_radius,
         chamfer: args.chamfer,
+        hole_style: match args.hole_style {
+            HoleStyleArg::Round => HoleStyle::Round,
+            HoleStyleArg::Countersunk => HoleStyle::Countersunk,
+        },
+        countersink_diameter: args.countersink_diameter,
+        countersink_angle: args.countersink_angle,
+        countersink_depth: args.countersink_depth,
+        countersink_side: match args.countersink_side {
+            CountersinkSideArg::Front => CountersinkSide::Front,
+            CountersinkSideArg::Back => CountersinkSide::Back,
+        },
         hole_diameter: args.hole_diameter,
         hole_inset: args.hole_inset,
         holes: args

@@ -3,7 +3,7 @@ use crate::geometry::{
     bounds as contour_bounds, point_in_polygon, signed_area, simplify_collinear, Contour, Point,
 };
 use crate::trace::{Region, Traced};
-use crate::{Config, HolePosition, Mode, PartsMode};
+use crate::{Config, CountersinkSide, HolePosition, HoleStyle, Mode, PartsMode};
 use anyhow::{anyhow, Result};
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
@@ -34,6 +34,14 @@ pub struct Part {
     pub mesh: Mesh,
     pub is_backing: bool,
     pub region_index: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CountersinkHole {
+    center: Point,
+    bore_radius: f64,
+    opening_radius: f64,
+    depth: f64,
 }
 
 pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
@@ -81,6 +89,31 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
         })
         .collect();
     let hole_paths: Vec<Contour> = hole_specs.iter().map(|(_, path)| path.clone()).collect();
+    let countersink_holes = if config.hole_style == HoleStyle::Countersunk {
+        let angle = config.countersink_angle.to_radians();
+        let depth = config
+            .countersink_diameter
+            .map_or(config.countersink_depth, |diameter| {
+                (diameter - config.hole_diameter) / 2.0 / (angle / 2.0).tan()
+            });
+        let opening_radius = config.countersink_diameter.map_or(
+            config.hole_diameter / 2.0 + depth * (angle / 2.0).tan(),
+            |diameter| diameter / 2.0,
+        );
+        Some(
+            hole_specs
+                .iter()
+                .map(|(center, _)| CountersinkHole {
+                    center: *center,
+                    bore_radius: config.hole_diameter / 2.0,
+                    opening_radius,
+                    depth,
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
     let transformed_backing: Vec<Contour> = traced
         .backing
         .iter()
@@ -129,6 +162,9 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
             depth - config.face_depth,
             config.chamfer,
             &chamfer_boundaries,
+            countersink_holes.as_deref(),
+            config.countersink_side == CountersinkSide::Back,
+            false,
         )?;
         parts.push(Part {
             name: format!("backing_{}", backing_color.hex()),
@@ -149,6 +185,9 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
                 config.parts,
                 config.chamfer,
                 &chamfer_boundaries,
+                countersink_holes.as_deref(),
+                config.countersink_side == CountersinkSide::Front,
+                true,
             )?;
         }
     } else {
@@ -164,6 +203,9 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
                 config.parts,
                 config.chamfer,
                 &chamfer_boundaries,
+                countersink_holes.as_deref(),
+                true,
+                config.countersink_side == CountersinkSide::Front,
             )?;
         }
     }
@@ -436,9 +478,21 @@ fn add_region_parts(
     mode: PartsMode,
     chamfer: f64,
     chamfer_boundaries: &[Contour],
+    countersink_holes: Option<&[CountersinkHole]>,
+    apply_countersink: bool,
+    countersink_from_top: bool,
 ) -> Result<()> {
     if mode == PartsMode::Color {
-        let mesh = extrude_for_config(&groups, z0, z1, chamfer, chamfer_boundaries)?;
+        let mesh = extrude_for_config(
+            &groups,
+            z0,
+            z1,
+            chamfer,
+            chamfer_boundaries,
+            countersink_holes,
+            apply_countersink,
+            countersink_from_top,
+        )?;
         out.push(Part {
             name: format!("color_{:02}_{}", region.color_index + 1, region.color.hex()),
             color: region.color,
@@ -448,7 +502,16 @@ fn add_region_parts(
         });
     } else {
         for (i, g) in groups.into_iter().enumerate() {
-            let mesh = extrude_for_config(&[g], z0, z1, chamfer, chamfer_boundaries)?;
+            let mesh = extrude_for_config(
+                &[g],
+                z0,
+                z1,
+                chamfer,
+                chamfer_boundaries,
+                countersink_holes,
+                apply_countersink,
+                countersink_from_top,
+            )?;
             out.push(Part {
                 name: format!(
                     "color_{:02}_{}_region_{:03}",
@@ -514,22 +577,38 @@ fn groups_from_overlay(cleaned: Vec<Vec<Vec<[f64; 2]>>>) -> Vec<(Contour, Vec<Co
     groups
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extrude_for_config(
     groups: &[(Contour, Vec<Contour>)],
     z0: f64,
     z1: f64,
     chamfer: f64,
     chamfer_boundaries: &[Contour],
+    countersink_holes: Option<&[CountersinkHole]>,
+    apply_countersink: bool,
+    countersink_from_top: bool,
 ) -> Result<Mesh> {
-    if chamfer <= 0.0 || chamfer_boundaries.is_empty() {
-        return extrude_groups(groups, z0, z1);
-    }
+    let countersink_holes = if apply_countersink {
+        countersink_holes.unwrap_or(&[])
+    } else {
+        &[]
+    };
     let mut mesh = Mesh::default();
     for group in groups {
-        let use_chamfer = chamfer_boundaries
-            .iter()
-            .any(|boundary| contours_match(&group.0, boundary));
-        let piece = if use_chamfer {
+        let use_countersink = !countersink_holes.is_empty();
+        let use_chamfer = chamfer > 0.0
+            && chamfer_boundaries
+                .iter()
+                .any(|boundary| contours_match(&group.0, boundary));
+        let piece = if use_countersink {
+            extrude_groups_countersunk(
+                std::slice::from_ref(group),
+                z0,
+                z1,
+                countersink_holes,
+                countersink_from_top,
+            )?
+        } else if use_chamfer {
             extrude_groups_chamfered(std::slice::from_ref(group), z0, z1, chamfer)?
         } else {
             extrude_groups(std::slice::from_ref(group), z0, z1)?
@@ -573,6 +652,133 @@ fn append_mesh(destination: &mut Mesh, source: Mesh) {
         }));
 }
 
+fn extrude_groups_countersunk(
+    groups: &[(Contour, Vec<Contour>)],
+    z0: f64,
+    z1: f64,
+    countersink_holes: &[CountersinkHole],
+    from_top: bool,
+) -> Result<Mesh> {
+    if countersink_holes.is_empty() {
+        return extrude_groups(groups, z0, z1);
+    }
+    let depth = countersink_holes[0].depth;
+    if z1 <= z0 || depth <= 0.0 || depth > z1 - z0 + 1e-9 {
+        return Err(anyhow!("countersink depth does not fit the part extrusion"));
+    }
+    let mut mesh = Mesh::default();
+    for (outer, holes) in groups {
+        let mut bore_loops = Vec::with_capacity(1 + holes.len());
+        bore_loops.push(outer.clone());
+        bore_loops.extend(holes.iter().cloned());
+        let opening_loops = scale_countersink_holes(&bore_loops, countersink_holes);
+        let mut layers = Vec::with_capacity(3);
+        if from_top {
+            layers.push((bore_loops.clone(), z0));
+            if depth < z1 - z0 - 1e-9 {
+                layers.push((bore_loops.clone(), z1 - depth));
+            }
+            layers.push((opening_loops, z1));
+        } else {
+            layers.push((opening_loops, z0));
+            if depth < z1 - z0 - 1e-9 {
+                layers.push((bore_loops.clone(), z0 + depth));
+            }
+            layers.push((bore_loops, z1));
+        }
+        let offsets: Vec<Vec<u32>> = layers
+            .iter()
+            .map(|(loops, z)| push_layer(&mut mesh, loops, *z))
+            .collect();
+        let cap_indices = triangulate_loops(&layers[0].0)?;
+        let cap_boundary_edges = boundary_edges_from_indices(&cap_indices);
+        if !boundary_edges_form_loops(&cap_boundary_edges, &layers[0].0) {
+            return extrude_groups(groups, z0, z1);
+        }
+        repair_cap_triangles(
+            &mut mesh,
+            &offsets[0],
+            offsets.last().unwrap(),
+            &cap_indices,
+        );
+        add_cap_triangles(&mut mesh, &offsets[0], &cap_indices, false);
+        add_cap_triangles(&mut mesh, offsets.last().unwrap(), &cap_indices, true);
+        for pair in offsets.windows(2) {
+            add_loop_rings(&mut mesh, &pair[0], &pair[1], &cap_boundary_edges);
+        }
+    }
+    Ok(mesh)
+}
+
+fn repair_cap_triangles(mesh: &mut Mesh, bottom: &[u32], top: &[u32], indices: &[usize]) {
+    for tri in indices.chunks_exact(3) {
+        let top_triangle = [
+            vertex_index(top, tri[0]),
+            vertex_index(top, tri[1]),
+            vertex_index(top, tri[2]),
+        ];
+        let bottom_triangle = [
+            vertex_index(bottom, tri[2]),
+            vertex_index(bottom, tri[1]),
+            vertex_index(bottom, tri[0]),
+        ];
+        let top_points = top_triangle.map(|index| mesh.vertices[index as usize]);
+        if triangle_area2(top_points[0], top_points[1], top_points[2]).abs()
+            <= DEGENERATE_AREA2_THRESHOLD
+        {
+            repair_degenerate_cap(mesh, top_triangle, bottom_triangle);
+        }
+        let bottom_points = bottom_triangle.map(|index| mesh.vertices[index as usize]);
+        if triangle_area2(bottom_points[0], bottom_points[1], bottom_points[2]).abs()
+            <= DEGENERATE_AREA2_THRESHOLD
+        {
+            repair_degenerate_cap(mesh, top_triangle, bottom_triangle);
+        }
+    }
+}
+
+fn scale_countersink_holes(
+    loops: &[Contour],
+    countersink_holes: &[CountersinkHole],
+) -> Vec<Contour> {
+    loops
+        .iter()
+        .enumerate()
+        .map(|(index, contour)| {
+            if index == 0 {
+                return contour.clone();
+            }
+            let Some(hole) = countersink_holes
+                .iter()
+                .find(|hole| contour_matches_countersink(contour, hole))
+            else {
+                return contour.clone();
+            };
+            let factor = hole.opening_radius / hole.bore_radius;
+            contour
+                .iter()
+                .map(|point| {
+                    Point::new(
+                        hole.center.x + (point.x - hole.center.x) * factor,
+                        hole.center.y + (point.y - hole.center.y) * factor,
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn contour_matches_countersink(contour: &Contour, hole: &CountersinkHole) -> bool {
+    if contour.is_empty() {
+        return false;
+    }
+    let center = Point::new(
+        contour.iter().map(|point| point.x).sum::<f64>() / contour.len() as f64,
+        contour.iter().map(|point| point.y).sum::<f64>() / contour.len() as f64,
+    );
+    center.distance(hole.center) <= hole.bore_radius * 1.5 + 1e-5
+}
+
 fn extrude_groups_chamfered(
     groups: &[(Contour, Vec<Contour>)],
     z0: f64,
@@ -608,25 +814,17 @@ fn extrude_groups_chamfered(
         add_cap_triangles(&mut mesh, &top_inner, &cap_indices, true);
         add_loop_rings(
             &mut mesh,
-            &loops,
             &lower_footprint,
             &upper_footprint,
             &cap_boundary_edges,
         );
         add_loop_rings(
             &mut mesh,
-            &loops,
             &bottom_inner,
             &lower_footprint,
             &cap_boundary_edges,
         );
-        add_loop_rings(
-            &mut mesh,
-            &loops,
-            &upper_footprint,
-            &top_inner,
-            &cap_boundary_edges,
-        );
+        add_loop_rings(&mut mesh, &upper_footprint, &top_inner, &cap_boundary_edges);
     }
     Ok(mesh)
 }
@@ -818,27 +1016,18 @@ fn vertex_index(offsets: &[u32], flat_index: usize) -> u32 {
     absolute as u32
 }
 
-fn add_loop_rings(
-    mesh: &mut Mesh,
-    loops: &[Contour],
-    lower: &[u32],
-    upper: &[u32],
-    edges: &[(usize, usize)],
-) {
+fn add_loop_rings(mesh: &mut Mesh, lower: &[u32], upper: &[u32], edges: &[(usize, usize)]) {
+    let Some(lower_base) = lower.first().copied() else {
+        return;
+    };
+    let Some(upper_base) = upper.first().copied() else {
+        return;
+    };
     for &(flat_a, flat_b) in edges {
-        let Some((li, a_local)) = flat_vertex(loops, flat_a) else {
-            continue;
-        };
-        let Some((other_li, b_local)) = flat_vertex(loops, flat_b) else {
-            continue;
-        };
-        if li != other_li {
-            continue;
-        }
-        let a = lower[li] + a_local as u32;
-        let b = lower[li] + b_local as u32;
-        let at = upper[li] + a_local as u32;
-        let bt = upper[li] + b_local as u32;
+        let a = lower_base + flat_a as u32;
+        let b = lower_base + flat_b as u32;
+        let at = upper_base + flat_a as u32;
+        let bt = upper_base + flat_b as u32;
         mesh.triangles.push(Triangle {
             v1: a,
             v2: b,
@@ -850,17 +1039,6 @@ fn add_loop_rings(
             v3: at,
         });
     }
-}
-
-fn flat_vertex(loops: &[Contour], flat_index: usize) -> Option<(usize, usize)> {
-    let mut start = 0;
-    for (li, contour) in loops.iter().enumerate() {
-        if flat_index < start + contour.len() {
-            return Some((li, flat_index - start));
-        }
-        start += contour.len();
-    }
-    None
 }
 
 fn extrude_groups(groups: &[(Contour, Vec<Contour>)], z0: f64, z1: f64) -> Result<Mesh> {
@@ -1313,5 +1491,89 @@ mod tests {
         assert!((bounds.2 - 100.0).abs() < 1e-9);
         assert!((bounds.3 - 50.0).abs() < 1e-9);
         assert!(signed_area(&rounded) < signed_area(&square));
+    }
+
+    #[test]
+    fn countersunk_hole_is_a_closed_tapered_shell() {
+        let outer = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(0.0, 100.0),
+        ];
+        let hole = (0..32)
+            .map(|i| {
+                let angle = std::f64::consts::TAU * i as f64 / 32.0;
+                Point::new(50.0 + 2.5 * angle.cos(), 50.0 + 2.5 * angle.sin())
+            })
+            .collect();
+        let mesh = extrude_groups_countersunk(
+            &[(outer, vec![hole])],
+            0.0,
+            3.0,
+            &[CountersinkHole {
+                center: Point::new(50.0, 50.0),
+                bore_radius: 2.5,
+                opening_radius: 4.0,
+                depth: 1.0,
+            }],
+            true,
+        )
+        .unwrap();
+        validate_parts(&[Part {
+            name: "countersunk".into(),
+            color: Rgb(0, 0, 0),
+            mesh: mesh.clone(),
+            is_backing: true,
+            region_index: 0,
+        }])
+        .unwrap();
+        assert!(mesh.vertices.iter().any(|vertex| {
+            (vertex.z - 3.0).abs() < 1e-9
+                && (vertex.x - 50.0).abs() > 3.5
+                && (vertex.x - 50.0).abs() < 4.1
+        }));
+    }
+
+    #[test]
+    fn countersunk_extrusion_handles_many_contours() {
+        let outer = (0..100)
+            .map(|i| {
+                let t = i as f64 / 100.0;
+                Point::new(100.0 * t, if i < 50 { 0.0 } else { 50.0 })
+            })
+            .collect::<Vec<_>>();
+        let mut holes = Vec::new();
+        for center in [Point::new(20.0, 25.0), Point::new(80.0, 25.0)] {
+            holes.push(
+                (0..32)
+                    .map(|i| {
+                        let angle = std::f64::consts::TAU * i as f64 / 32.0;
+                        Point::new(center.x + 2.5 * angle.cos(), center.y + 2.5 * angle.sin())
+                    })
+                    .collect(),
+            );
+        }
+        let mesh = extrude_groups_countersunk(
+            &[(outer, holes)],
+            0.0,
+            3.0,
+            &[CountersinkHole {
+                center: Point::new(20.0, 25.0),
+                bore_radius: 2.5,
+                opening_radius: 4.0,
+                depth: 1.0,
+            }],
+            true,
+        )
+        .unwrap();
+        validate_parts(&[Part {
+            name: "many-contours".into(),
+            color: Rgb(0, 0, 0),
+            mesh,
+            is_backing: true,
+            region_index: 0,
+        }])
+        .unwrap();
     }
 }

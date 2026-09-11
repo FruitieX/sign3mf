@@ -14,6 +14,7 @@ sign3mf --input warning.png --output warning.3mf --width 150
 sign3mf --input warning.jpg --output warning.3mf --height 120 --mode backed --face-depth 1.0 --remove-background '#FFFFFF' --background-tolerance 20 --trim --upscale 4 --filter cubic --svg-out warning.svg
 sign3mf --input plate.png --output plate.3mf --width 180 --hole corners --hole-diameter 5
 sign3mf --input plate.png --output rounded.3mf --width 180 --corner-radius 4 --chamfer 0.25
+sign3mf --input plate.png --output countersunk.3mf --width 180 --hole corners --hole-style countersunk
 ```
 
 Exactly one of `--width` and `--height` is required; both are measured in mm.
@@ -37,7 +38,15 @@ Use repeatable `--hole` values (`corners`, `center-top`, `center-left`,
 `center-right`, or `center-bottom`) to add round through-holes. Values may also
 be comma-separated. Hole centres default to 5 mm from the nearest edge and the
 default hole diameter is 5 mm; customize them with `--hole-inset` and
-`--hole-diameter`. Countersunk holes are not enabled yet.
+`--hole-diameter`.
+
+Set `--hole-style countersunk` to add a tapered screw seat while retaining the
+through-bore. The countersink defaults to a 90 degree included angle and 1 mm
+depth; use `--countersink-depth`, `--countersink-angle`, or an explicit
+`--countersink-diameter` to customize it. `--countersink-side back` (the
+default) opens on the backing face; use `front` for the artwork face.
+Countersunk holes and `--chamfer` are currently separate options and cannot be
+used together.
 
 The 3MF contains one parent component object and a build item referencing it.
 Each colour has a stable name such as `color_01_FFCC00` and a standard display

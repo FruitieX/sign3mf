@@ -45,6 +45,18 @@ pub enum HolePosition {
     CenterBottom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoleStyle {
+    Round,
+    Countersunk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountersinkSide {
+    Front,
+    Back,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub input: PathBuf,
@@ -59,6 +71,11 @@ pub struct Config {
     pub face_depth: f64,
     pub corner_radius: f64,
     pub chamfer: f64,
+    pub hole_style: HoleStyle,
+    pub countersink_diameter: Option<f64>,
+    pub countersink_angle: f64,
+    pub countersink_depth: f64,
+    pub countersink_side: CountersinkSide,
     pub hole_diameter: f64,
     pub hole_inset: f64,
     pub holes: Vec<HolePosition>,
@@ -94,6 +111,11 @@ impl Default for Config {
             face_depth: 1.0,
             corner_radius: 0.0,
             chamfer: 0.0,
+            hole_style: HoleStyle::Round,
+            countersink_diameter: None,
+            countersink_angle: 90.0,
+            countersink_depth: 1.0,
+            countersink_side: CountersinkSide::Back,
             hole_diameter: 5.0,
             hole_inset: 5.0,
             holes: Vec::new(),
@@ -234,6 +256,29 @@ fn validate_config(c: &Config) -> Result<()> {
     if !c.chamfer.is_finite() || c.chamfer < 0.0 {
         return Err(anyhow!("--chamfer must be non-negative"));
     }
+    if !c.countersink_angle.is_finite()
+        || c.countersink_angle <= 0.0
+        || c.countersink_angle >= 180.0
+    {
+        return Err(anyhow!(
+            "--countersink-angle must be greater than 0 and smaller than 180 degrees"
+        ));
+    }
+    if !c.countersink_depth.is_finite() || c.countersink_depth <= 0.0 {
+        return Err(anyhow!("--countersink-depth must be positive"));
+    }
+    if let Some(diameter) = c.countersink_diameter {
+        if !diameter.is_finite() || diameter <= c.hole_diameter {
+            return Err(anyhow!(
+                "--countersink-diameter must be greater than --hole-diameter"
+            ));
+        }
+    }
+    if c.hole_style == HoleStyle::Countersunk && c.chamfer > 0.0 {
+        return Err(anyhow!(
+            "--chamfer cannot be combined with --hole-style countersunk yet"
+        ));
+    }
     let shallowest_part = if c.mode == Mode::Backed {
         c.face_depth.min(c.thickness - c.face_depth)
     } else {
@@ -243,6 +288,22 @@ fn validate_config(c: &Config) -> Result<()> {
         return Err(anyhow!(
             "--chamfer must be smaller than half of the shallowest extruded layer ({shallowest_part:.3} mm)"
         ));
+    }
+    if c.hole_style == HoleStyle::Countersunk {
+        let countersink_depth = c.countersink_diameter.map(|diameter| {
+            (diameter - c.hole_diameter) / 2.0 / (c.countersink_angle.to_radians() / 2.0).tan()
+        });
+        let depth = countersink_depth.unwrap_or(c.countersink_depth);
+        let selected_depth = match (c.mode, c.countersink_side) {
+            (Mode::Backed, CountersinkSide::Back) => c.thickness - c.face_depth,
+            (Mode::Backed, CountersinkSide::Front) => c.face_depth,
+            (Mode::FullDepth, _) => c.thickness,
+        };
+        if !depth.is_finite() || depth <= 0.0 || depth > selected_depth + 1e-9 {
+            return Err(anyhow!(
+                "countersink depth {depth:.3} mm does not fit the selected {selected_depth:.3} mm layer; reduce --countersink-diameter/--countersink-depth"
+            ));
+        }
     }
     if !c.hole_diameter.is_finite() || c.hole_diameter <= 0.0 {
         return Err(anyhow!("--hole-diameter must be positive"));
