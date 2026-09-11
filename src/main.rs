@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
-use clap::{Parser, ValueEnum};
+use clap::{ArgAction, Parser, ValueEnum};
 use sign3mf::{
-    color::parse_hex, color::parse_palette, convert_and_write, Config, Filter, Mode, PartsMode,
-    TraceMode,
+    color::parse_hex, color::parse_palette, convert_and_write, Config, Filter, HolePosition, Mode,
+    PartsMode, TraceMode,
 };
 use std::path::PathBuf;
 
@@ -49,6 +49,26 @@ struct Args {
         help = "Colored face depth in millimetres (mm) for backed mode."
     )]
     face_depth: f64,
+    #[arg(
+        long,
+        default_value_t = 5.0,
+        help = "Round screw-hole diameter in millimetres (mm). Used with --hole."
+    )]
+    hole_diameter: f64,
+    #[arg(
+        long,
+        default_value_t = 5.0,
+        help = "Distance from the nearest sign edge to each hole centre in millimetres (mm)."
+    )]
+    hole_inset: f64,
+    #[arg(
+        long = "hole",
+        value_enum,
+        value_delimiter = ',',
+        action = ArgAction::Append,
+        help = "Add round through-holes at corners, center-top, center-left, center-right, or center-bottom. Repeat or comma-separate."
+    )]
+    holes: Vec<HoleArg>,
     #[arg(long)]
     backing_color: Option<String>,
     #[arg(
@@ -107,6 +127,14 @@ enum OrientationArg {
     RightSideUp,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum HoleArg {
+    Corners,
+    CenterTop,
+    CenterLeft,
+    CenterRight,
+    CenterBottom,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum FilterArg {
     Nearest,
     Cubic,
@@ -146,6 +174,19 @@ fn main() -> Result<()> {
         },
         upside_down: matches!(args.orientation, OrientationArg::UpsideDown),
         face_depth: args.face_depth,
+        hole_diameter: args.hole_diameter,
+        hole_inset: args.hole_inset,
+        holes: args
+            .holes
+            .into_iter()
+            .map(|hole| match hole {
+                HoleArg::Corners => HolePosition::Corners,
+                HoleArg::CenterTop => HolePosition::CenterTop,
+                HoleArg::CenterLeft => HolePosition::CenterLeft,
+                HoleArg::CenterRight => HolePosition::CenterRight,
+                HoleArg::CenterBottom => HolePosition::CenterBottom,
+            })
+            .collect(),
         backing_color: args.backing_color.as_deref().map(parse_hex).transpose()?,
         upscale: args.upscale,
         filter: match args.filter {

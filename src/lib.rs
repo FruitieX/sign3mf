@@ -36,6 +36,15 @@ pub enum PartsMode {
     Region,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HolePosition {
+    Corners,
+    CenterTop,
+    CenterLeft,
+    CenterRight,
+    CenterBottom,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub input: PathBuf,
@@ -48,6 +57,9 @@ pub struct Config {
     pub mode: Mode,
     pub upside_down: bool,
     pub face_depth: f64,
+    pub hole_diameter: f64,
+    pub hole_inset: f64,
+    pub holes: Vec<HolePosition>,
     pub backing_color: Option<Rgb>,
     pub upscale: u32,
     pub filter: Filter,
@@ -78,6 +90,9 @@ impl Default for Config {
             mode: Mode::Backed,
             upside_down: true,
             face_depth: 1.0,
+            hole_diameter: 5.0,
+            hole_inset: 5.0,
+            holes: Vec::new(),
             backing_color: None,
             upscale: 4,
             filter: Filter::Cubic,
@@ -208,6 +223,14 @@ fn validate_config(c: &Config) -> Result<()> {
     }
     if c.mode == Mode::FullDepth && c.backing_color.is_some() {
         return Err(anyhow!("--backing-color is only valid with --mode backed"));
+    }
+    if !c.hole_diameter.is_finite() || c.hole_diameter <= 0.0 {
+        return Err(anyhow!("--hole-diameter must be positive"));
+    }
+    if !c.hole_inset.is_finite() || c.hole_inset <= c.hole_diameter / 2.0 {
+        return Err(anyhow!(
+            "--hole-inset must be greater than half of --hole-diameter"
+        ));
     }
     if c.upscale == 0 {
         return Err(anyhow!("--upscale must be at least 1"));

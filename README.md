@@ -12,6 +12,7 @@ Build and run from this directory:
 cargo build --release
 sign3mf --input warning.png --output warning.3mf --width 150
 sign3mf --input warning.jpg --output warning.3mf --height 120 --mode backed --face-depth 1.0 --remove-background '#FFFFFF' --background-tolerance 20 --trim --upscale 4 --filter cubic --svg-out warning.svg
+sign3mf --input plate.png --output plate.3mf --width 180 --hole corners --hole-diameter 5
 ```
 
 Exactly one of `--width` and `--height` is required; both are measured in mm.
@@ -24,6 +25,12 @@ colour the full requested thickness. `--mode backed` creates a separately
 named backing from the visible artwork and puts each colour in the remaining
 face depth in mm. `--parts color` groups disconnected shells of one colour into one
 mesh; `--parts region` creates one part per disconnected region.
+
+Use repeatable `--hole` values (`corners`, `center-top`, `center-left`,
+`center-right`, or `center-bottom`) to add round through-holes. Values may also
+be comma-separated. Hole centres default to 5 mm from the nearest edge and the
+default hole diameter is 5 mm; customize them with `--hole-inset` and
+`--hole-diameter`. Countersunk holes are not enabled yet.
 
 The 3MF contains one parent component object and a build item referencing it.
 Each colour has a stable name such as `color_01_FFCC00` and a standard display

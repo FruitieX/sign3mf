@@ -1,7 +1,9 @@
 use crate::color::Rgb;
-use crate::geometry::{bounds as contour_bounds, signed_area, simplify_collinear, Contour, Point};
+use crate::geometry::{
+    bounds as contour_bounds, point_in_polygon, signed_area, simplify_collinear, Contour, Point,
+};
 use crate::trace::{Region, Traced};
-use crate::{Config, Mode, PartsMode};
+use crate::{Config, HolePosition, Mode, PartsMode};
 use anyhow::{anyhow, Result};
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
@@ -46,6 +48,21 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
         requested / source_h
     };
     let model_width = source_w * scale;
+    let model_height = source_h * scale;
+    let raw_hole_specs = build_hole_specs(
+        &config.holes,
+        model_width,
+        model_height,
+        config.hole_diameter,
+        config.hole_inset,
+    )?;
+    let orient_model = |p: Point| {
+        let mut x = p.x;
+        if config.upside_down {
+            x = model_width - x;
+        }
+        Point::new(x, p.y)
+    };
     let transform = |p: Point| {
         let mut x = (p.x - raw_bounds.0) * scale;
         let y = (p.y - raw_bounds.1) * scale;
@@ -54,20 +71,32 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
         }
         Point::new(x, y)
     };
+    let hole_specs: Vec<(Point, Contour)> = raw_hole_specs
+        .into_iter()
+        .map(|(center, path)| {
+            (
+                orient_model(center),
+                path.into_iter().map(&orient_model).collect(),
+            )
+        })
+        .collect();
+    let hole_paths: Vec<Contour> = hole_specs.iter().map(|(_, path)| path.clone()).collect();
     let normalize_groups = |cs: &[Contour]| -> Vec<(Contour, Vec<Contour>)> {
-        group_contours(cs)
-            .into_iter()
-            .map(|(outer, holes)| {
-                (
-                    outer.into_iter().map(&transform).collect(),
-                    holes
-                        .into_iter()
-                        .map(|hole| hole.into_iter().map(&transform).collect())
-                        .collect(),
-                )
-            })
-            .collect()
+        let transformed: Vec<Contour> = cs
+            .iter()
+            .map(|contour| contour.iter().copied().map(&transform).collect())
+            .collect();
+        subtract_holes(group_contours(&transformed), &hole_paths)
     };
+    if !hole_specs.is_empty() {
+        let transformed_backing: Vec<Contour> = traced
+            .backing
+            .iter()
+            .map(|contour| contour.iter().copied().map(&transform).collect())
+            .collect();
+        let backing_groups = group_contours(&transformed_backing);
+        validate_hole_containment(&backing_groups, &hole_specs)?;
+    }
     let depth = config.thickness;
     let mut parts = Vec::new();
     if config.mode == Mode::Backed {
@@ -126,6 +155,135 @@ fn region_area(region: &Region) -> f64 {
         .map(|c| -signed_area(c))
         .sum::<f64>()
         .abs()
+}
+
+fn build_hole_specs(
+    positions: &[HolePosition],
+    width: f64,
+    height: f64,
+    diameter: f64,
+    inset: f64,
+) -> Result<Vec<(Point, Contour)>> {
+    if positions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let radius = diameter / 2.0;
+    let mut centers = Vec::new();
+    let mut add_center = |center: Point| {
+        if !centers.iter().any(|existing: &Point| {
+            (existing.x - center.x).abs() <= 1e-9 && (existing.y - center.y).abs() <= 1e-9
+        }) {
+            centers.push(center);
+        }
+    };
+    for position in positions {
+        match position {
+            HolePosition::Corners => {
+                add_center(Point::new(inset, inset));
+                add_center(Point::new(width - inset, inset));
+                add_center(Point::new(width - inset, height - inset));
+                add_center(Point::new(inset, height - inset));
+            }
+            HolePosition::CenterTop => add_center(Point::new(width / 2.0, height - inset)),
+            HolePosition::CenterLeft => add_center(Point::new(inset, height / 2.0)),
+            HolePosition::CenterRight => add_center(Point::new(width - inset, height / 2.0)),
+            HolePosition::CenterBottom => add_center(Point::new(width / 2.0, inset)),
+        }
+    }
+    for center in &centers {
+        if center.x - radius <= 0.0
+            || center.x + radius >= width
+            || center.y - radius <= 0.0
+            || center.y + radius >= height
+        {
+            return Err(anyhow!(
+                "hole at ({:.2}, {:.2}) mm does not fit inside the {:.2} × {:.2} mm sign; increase --hole-inset or reduce --hole-diameter",
+                center.x,
+                center.y,
+                width,
+                height
+            ));
+        }
+    }
+    for (i, a) in centers.iter().enumerate() {
+        for b in centers.iter().skip(i + 1) {
+            if a.distance(*b) < diameter - 1e-9 {
+                return Err(anyhow!(
+                    "screw holes at ({:.2}, {:.2}) mm and ({:.2}, {:.2}) mm overlap",
+                    a.x,
+                    a.y,
+                    b.x,
+                    b.y
+                ));
+            }
+        }
+    }
+    let specs = centers
+        .into_iter()
+        .map(|center| {
+            let path = (0..64)
+                .map(|i| {
+                    let angle = std::f64::consts::TAU * i as f64 / 64.0;
+                    Point::new(
+                        center.x + radius * angle.cos(),
+                        center.y + radius * angle.sin(),
+                    )
+                })
+                .collect();
+            (center, path)
+        })
+        .collect();
+    Ok(specs)
+}
+
+fn validate_hole_containment(
+    groups: &[(Contour, Vec<Contour>)],
+    specs: &[(Point, Contour)],
+) -> Result<()> {
+    for (center, path) in specs {
+        let contained = point_in_groups(*center, groups)
+            && path
+                .iter()
+                .copied()
+                .all(|point| point_in_groups(point, groups));
+        if !contained {
+            return Err(anyhow!(
+                "hole at ({:.2}, {:.2}) mm is outside the printable artwork; choose another placement",
+                center.x,
+                center.y
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn point_in_groups(point: Point, groups: &[(Contour, Vec<Contour>)]) -> bool {
+    groups.iter().any(|(outer, holes)| {
+        point_in_polygon(point, outer) && !holes.iter().any(|hole| point_in_polygon(point, hole))
+    })
+}
+
+fn subtract_holes(
+    groups: Vec<(Contour, Vec<Contour>)>,
+    hole_paths: &[Contour],
+) -> Vec<(Contour, Vec<Contour>)> {
+    if hole_paths.is_empty() || groups.is_empty() {
+        return groups;
+    }
+    let subject: Vec<Vec<[f64; 2]>> = groups
+        .iter()
+        .flat_map(|(outer, holes)| {
+            std::iter::once(outer)
+                .chain(holes.iter())
+                .map(|contour| contour.iter().map(|p| [p.x, p.y]).collect())
+        })
+        .collect();
+    let clips: Vec<Vec<[f64; 2]>> = hole_paths
+        .iter()
+        .map(|contour| contour.iter().map(|p| [p.x, p.y]).collect())
+        .collect();
+    let cleaned = subject.overlay(&clips, OverlayRule::Difference, FillRule::EvenOdd);
+    groups_from_overlay(cleaned)
 }
 
 fn add_region_parts(
@@ -188,6 +346,10 @@ fn group_contours(contours: &[Contour]) -> Vec<(Contour, Vec<Contour>)> {
     }
     let empty_clip: Vec<[f64; 2]> = Vec::new();
     let cleaned = subject.overlay(&empty_clip, OverlayRule::Union, FillRule::EvenOdd);
+    groups_from_overlay(cleaned)
+}
+
+fn groups_from_overlay(cleaned: Vec<Vec<Vec<[f64; 2]>>>) -> Vec<(Contour, Vec<Contour>)> {
     let mut groups = Vec::new();
     for shape in cleaned {
         let mut loops = shape.into_iter().filter(|c| c.len() >= 3);
@@ -590,5 +752,32 @@ mod tests {
         ];
         let m = extrude_groups(&[(o, vec![h])], 0.0, 3.0).unwrap();
         assert!((volume(&m) - 252.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn screw_hole_subtraction_creates_a_closed_cutout() {
+        let outer = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(0.0, 100.0),
+        ];
+        let (_, holes) = build_hole_specs(&[HolePosition::CenterTop], 100.0, 100.0, 10.0, 15.0)
+            .unwrap()
+            .remove(0);
+        let groups = subtract_holes(group_contours(&[outer]), &[holes]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1.len(), 1);
+        let mesh = extrude_groups(&groups, 0.0, 3.0).unwrap();
+        validate_parts(&[Part {
+            name: "test".into(),
+            color: Rgb(0, 0, 0),
+            mesh: mesh.clone(),
+            is_backing: true,
+            region_index: 0,
+        }])
+        .unwrap();
+        let removed_area = signed_area(&groups[0].1[0]).abs();
+        assert!((volume(&mesh) - (100.0 * 100.0 - removed_area) * 3.0).abs() < 1e-5);
     }
 }
