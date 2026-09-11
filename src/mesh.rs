@@ -44,6 +44,13 @@ struct CountersinkHole {
     depth: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum OuterContourKind {
+    Original,
+    Chamfered,
+    Inset,
+}
+
 pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
     let all: Vec<Contour> = traced.backing.to_vec();
     let raw_bounds = contour_bounds(&all).ok_or_else(|| anyhow!("traced artwork has no bounds"))?;
@@ -162,6 +169,8 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
             depth - config.face_depth,
             config.chamfer,
             &chamfer_boundaries,
+            true,
+            false,
             countersink_holes.as_deref(),
             config.countersink_side == CountersinkSide::Back,
             false,
@@ -185,6 +194,8 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
                 config.parts,
                 config.chamfer,
                 &chamfer_boundaries,
+                false,
+                true,
                 countersink_holes.as_deref(),
                 config.countersink_side == CountersinkSide::Front,
                 true,
@@ -203,6 +214,8 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
                 config.parts,
                 config.chamfer,
                 &chamfer_boundaries,
+                true,
+                true,
                 countersink_holes.as_deref(),
                 true,
                 config.countersink_side == CountersinkSide::Front,
@@ -478,6 +491,8 @@ fn add_region_parts(
     mode: PartsMode,
     chamfer: f64,
     chamfer_boundaries: &[Contour],
+    chamfer_bottom: bool,
+    chamfer_top: bool,
     countersink_holes: Option<&[CountersinkHole]>,
     apply_countersink: bool,
     countersink_from_top: bool,
@@ -489,6 +504,8 @@ fn add_region_parts(
             z1,
             chamfer,
             chamfer_boundaries,
+            chamfer_bottom,
+            chamfer_top,
             countersink_holes,
             apply_countersink,
             countersink_from_top,
@@ -508,6 +525,8 @@ fn add_region_parts(
                 z1,
                 chamfer,
                 chamfer_boundaries,
+                chamfer_bottom,
+                chamfer_top,
                 countersink_holes,
                 apply_countersink,
                 countersink_from_top,
@@ -584,6 +603,8 @@ fn extrude_for_config(
     z1: f64,
     chamfer: f64,
     chamfer_boundaries: &[Contour],
+    chamfer_bottom: bool,
+    chamfer_top: bool,
     countersink_holes: Option<&[CountersinkHole]>,
     apply_countersink: bool,
     countersink_from_top: bool,
@@ -597,10 +618,22 @@ fn extrude_for_config(
     for group in groups {
         let use_countersink = !countersink_holes.is_empty();
         let use_chamfer = chamfer > 0.0
+            && (chamfer_bottom || chamfer_top)
             && chamfer_boundaries
                 .iter()
                 .any(|boundary| contours_match(&group.0, boundary));
-        let piece = if use_countersink {
+        let piece = if use_countersink && use_chamfer {
+            extrude_groups_countersunk_chamfered(
+                std::slice::from_ref(group),
+                z0,
+                z1,
+                countersink_holes,
+                countersink_from_top,
+                chamfer,
+                chamfer_bottom,
+                chamfer_top,
+            )?
+        } else if use_countersink {
             extrude_groups_countersunk(
                 std::slice::from_ref(group),
                 z0,
@@ -609,7 +642,14 @@ fn extrude_for_config(
                 countersink_from_top,
             )?
         } else if use_chamfer {
-            extrude_groups_chamfered(std::slice::from_ref(group), z0, z1, chamfer)?
+            extrude_groups_chamfered(
+                std::slice::from_ref(group),
+                z0,
+                z1,
+                chamfer,
+                chamfer_bottom,
+                chamfer_top,
+            )?
         } else {
             extrude_groups(std::slice::from_ref(group), z0, z1)?
         };
@@ -710,6 +750,176 @@ fn extrude_groups_countersunk(
     Ok(mesh)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn extrude_groups_countersunk_chamfered(
+    groups: &[(Contour, Vec<Contour>)],
+    z0: f64,
+    z1: f64,
+    countersink_holes: &[CountersinkHole],
+    from_top: bool,
+    chamfer: f64,
+    chamfer_bottom: bool,
+    chamfer_top: bool,
+) -> Result<Mesh> {
+    if countersink_holes.is_empty() {
+        return extrude_groups_chamfered(groups, z0, z1, chamfer, chamfer_bottom, chamfer_top);
+    }
+    if z1 <= z0 {
+        return Err(anyhow!("extrusion depth must be positive"));
+    }
+    let depth = z1 - z0;
+    let sink_depth = countersink_holes[0].depth;
+    if !sink_depth.is_finite() || sink_depth <= 0.0 {
+        return Err(anyhow!("countersink depth must be positive"));
+    }
+    const MIN_BEVEL_SPAN: f64 = 1e-6;
+    if (chamfer_bottom || chamfer_top) && depth <= MIN_BEVEL_SPAN {
+        return Err(anyhow!(
+            "chamfered extrusion depth must be greater than {MIN_BEVEL_SPAN} mm"
+        ));
+    }
+    let available_cut = depth - MIN_BEVEL_SPAN;
+    let bottom_cut = if chamfer_bottom {
+        chamfer.min(available_cut)
+    } else {
+        0.0
+    };
+    let top_cut = if chamfer_top {
+        chamfer.min(available_cut)
+    } else {
+        0.0
+    };
+    if (chamfer_bottom && bottom_cut <= 0.0)
+        || (chamfer_top && top_cut <= 0.0)
+        || (chamfer_bottom && chamfer_top && bottom_cut + top_cut >= depth)
+    {
+        return Err(anyhow!(
+            "chamfer does not fit inside the part's extrusion depth"
+        ));
+    }
+
+    let mut mesh = Mesh::default();
+    for (outer, holes) in groups {
+        let chamfered_outer = chamfer_contour(outer, chamfer);
+        let inset_outer =
+            offset_contour(&chamfered_outer, chamfer).unwrap_or_else(|_| chamfered_outer.clone());
+        let mut resampled = common_resampled_contours(&[outer, &chamfered_outer, &inset_outer]);
+        for contour in &mut resampled {
+            perturb_collinear_points(contour);
+        }
+        let outer_variants = [&resampled[0], &resampled[1], &resampled[2]];
+        let opening_holes = scale_countersink_hole_contours(holes, countersink_holes);
+        let bottom_kind = if chamfer_bottom {
+            OuterContourKind::Inset
+        } else {
+            OuterContourKind::Original
+        };
+        let top_kind = if chamfer_top {
+            OuterContourKind::Inset
+        } else {
+            OuterContourKind::Original
+        };
+        let bottom_opening = !from_top;
+        let top_opening = from_top;
+        let make_loops = |kind: OuterContourKind, opening: bool| {
+            let outer = match kind {
+                OuterContourKind::Original => outer_variants[0],
+                OuterContourKind::Chamfered => outer_variants[1],
+                OuterContourKind::Inset => outer_variants[2],
+            };
+            let mut loops = Vec::with_capacity(1 + holes.len());
+            loops.push(outer.clone());
+            loops.extend(if opening {
+                opening_holes.clone()
+            } else {
+                holes.clone()
+            });
+            loops
+        };
+
+        let mut transitions: Vec<(f64, Option<OuterContourKind>, Option<bool>)> =
+            Vec::with_capacity(4);
+        if chamfer_bottom {
+            transitions.push((z0 + bottom_cut, Some(OuterContourKind::Chamfered), None));
+        }
+        if chamfer_top {
+            transitions.push((z1 - top_cut, Some(OuterContourKind::Chamfered), None));
+        }
+        if sink_depth < depth - 1e-9 {
+            if from_top {
+                transitions.push((z1 - sink_depth, None, Some(false)));
+            } else {
+                transitions.push((z0 + sink_depth, None, Some(false)));
+            }
+        }
+        transitions.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut layers: Vec<(Vec<Contour>, f64)> = Vec::with_capacity(6);
+        layers.push((make_loops(bottom_kind, bottom_opening), z0));
+        let mut current_z = z0;
+        let mut current_kind = bottom_kind;
+        let mut current_opening = bottom_opening;
+        for (event_z, kind, opening) in transitions {
+            let event_z = event_z.clamp(z0, z1);
+            if event_z > current_z + 1e-8 {
+                layers.push((make_loops(current_kind, current_opening), event_z));
+                current_z = event_z;
+            }
+            if let Some(kind) = kind {
+                current_kind = kind;
+            }
+            if let Some(opening) = opening {
+                current_opening = opening;
+            }
+        }
+        layers.push((make_loops(top_kind, top_opening), z1));
+
+        let offsets: Vec<Vec<u32>> = layers
+            .iter()
+            .map(|(loops, z)| push_layer(&mut mesh, loops, *z))
+            .collect();
+        let cap_indices = triangulate_loops(&layers[0].0)?;
+        let cap_boundary_edges = boundary_edges_from_indices(&cap_indices);
+        if !boundary_edges_form_loops(&cap_boundary_edges, &layers[0].0) {
+            return extrude_groups_countersunk(groups, z0, z1, countersink_holes, from_top);
+        }
+        repair_degenerate_cap_across_layers(&mut mesh, &offsets, &cap_indices);
+        add_cap_triangles(&mut mesh, &offsets[0], &cap_indices, false);
+        add_cap_triangles(&mut mesh, offsets.last().unwrap(), &cap_indices, true);
+        for pair in offsets.windows(2) {
+            add_loop_rings(&mut mesh, &pair[0], &pair[1], &cap_boundary_edges);
+        }
+    }
+    Ok(mesh)
+}
+
+fn scale_countersink_hole_contours(
+    holes: &[Contour],
+    countersink_holes: &[CountersinkHole],
+) -> Vec<Contour> {
+    holes
+        .iter()
+        .map(|contour| {
+            let Some(hole) = countersink_holes
+                .iter()
+                .find(|hole| contour_matches_countersink(contour, hole))
+            else {
+                return contour.clone();
+            };
+            let factor = hole.opening_radius / hole.bore_radius;
+            contour
+                .iter()
+                .map(|point| {
+                    Point::new(
+                        hole.center.x + (point.x - hole.center.x) * factor,
+                        hole.center.y + (point.y - hole.center.y) * factor,
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn repair_cap_triangles(mesh: &mut Mesh, bottom: &[u32], top: &[u32], indices: &[usize]) {
     for tri in indices.chunks_exact(3) {
         let top_triangle = [
@@ -784,13 +994,141 @@ fn extrude_groups_chamfered(
     z0: f64,
     z1: f64,
     chamfer: f64,
+    chamfer_bottom: bool,
+    chamfer_top: bool,
 ) -> Result<Mesh> {
     if z1 <= z0 {
         return Err(anyhow!("extrusion depth must be positive"));
     }
+    if !chamfer_bottom && !chamfer_top {
+        return extrude_groups(groups, z0, z1);
+    }
+    if !chamfer.is_finite() || chamfer <= 0.0 {
+        return extrude_groups(groups, z0, z1);
+    }
+
+    if chamfer_bottom && chamfer_top {
+        return extrude_groups_chamfered_symmetric(groups, z0, z1, chamfer);
+    }
+
+    let depth = z1 - z0;
+    const MIN_BEVEL_SPAN: f64 = 1e-6;
+    if depth <= MIN_BEVEL_SPAN {
+        return Err(anyhow!(
+            "chamfered extrusion depth must be greater than {MIN_BEVEL_SPAN} mm"
+        ));
+    }
+    let available_cut = depth - MIN_BEVEL_SPAN;
+    let bottom_cut = if chamfer_bottom {
+        // In backed mode a face can be thinner than the requested horizontal
+        // chamfer distance. Keep the interface planar and limit only the
+        // vertical part of the bevel to the available layer depth.
+        chamfer.min(available_cut)
+    } else {
+        0.0
+    };
+    let top_cut = if chamfer_top {
+        chamfer.min(available_cut)
+    } else {
+        0.0
+    };
+    if (chamfer_bottom && bottom_cut <= 0.0)
+        || (chamfer_top && top_cut <= 0.0)
+        || (chamfer_bottom && chamfer_top && bottom_cut + top_cut >= depth)
+    {
+        return Err(anyhow!(
+            "chamfer does not fit inside the part's extrusion depth"
+        ));
+    }
+
+    let mut mesh = Mesh::default();
+    for (outer, holes) in groups {
+        let chamfered_outer = chamfer_contour(outer, chamfer);
+        let inset_outer =
+            offset_contour(&chamfered_outer, chamfer).unwrap_or_else(|_| chamfered_outer.clone());
+
+        // Chamfering inserts points at corners. Resample the original and
+        // chamfered contours onto the union of their perimeter fractions so
+        // that an unchamfered interface can still share the same ring indices
+        // without changing its outline.
+        let mut resampled = common_resampled_contours(&[outer, &chamfered_outer, &inset_outer]);
+        for contour in &mut resampled {
+            perturb_collinear_points(contour);
+        }
+        let original_outer = &resampled[0];
+        let chamfered_outer = &resampled[1];
+        let inset_outer = &resampled[2];
+
+        let bottom_cap_outer = if chamfer_bottom {
+            inset_outer
+        } else {
+            original_outer
+        };
+        let bottom_transition_outer = if chamfer_bottom {
+            chamfered_outer
+        } else {
+            original_outer
+        };
+        let top_transition_outer = if chamfer_top {
+            chamfered_outer
+        } else {
+            original_outer
+        };
+        let top_cap_outer = if chamfer_top {
+            inset_outer
+        } else {
+            original_outer
+        };
+
+        let make_loops = |outer: &Contour| {
+            let mut loops = Vec::with_capacity(1 + holes.len());
+            loops.push(outer.clone());
+            loops.extend(holes.iter().cloned());
+            loops
+        };
+        let bottom_cap_loops = make_loops(bottom_cap_outer);
+        let bottom_transition_loops = make_loops(bottom_transition_outer);
+        let top_transition_loops = make_loops(top_transition_outer);
+        let top_cap_loops = make_loops(top_cap_outer);
+
+        let mut layers: Vec<(Vec<Contour>, f64)> = Vec::with_capacity(4);
+        layers.push((bottom_cap_loops.clone(), z0));
+        if chamfer_bottom {
+            layers.push((bottom_transition_loops, z0 + bottom_cut));
+        }
+        if chamfer_top {
+            layers.push((top_transition_loops, z1 - top_cut));
+        }
+        layers.push((top_cap_loops, z1));
+
+        let offsets: Vec<Vec<u32>> = layers
+            .iter()
+            .map(|(loops, z)| push_layer(&mut mesh, loops, *z))
+            .collect();
+        let cap_indices = triangulate_loops(&layers[0].0)?;
+        let cap_boundary_edges = boundary_edges_from_indices(&cap_indices);
+        if cap_boundary_edges.is_empty() {
+            return extrude_groups(groups, z0, z1);
+        }
+        repair_degenerate_cap_across_layers(&mut mesh, &offsets, &cap_indices);
+        add_cap_triangles(&mut mesh, &offsets[0], &cap_indices, false);
+        add_cap_triangles(&mut mesh, offsets.last().unwrap(), &cap_indices, true);
+        for pair in offsets.windows(2) {
+            add_loop_rings(&mut mesh, &pair[0], &pair[1], &cap_boundary_edges);
+        }
+    }
+    Ok(mesh)
+}
+
+fn extrude_groups_chamfered_symmetric(
+    groups: &[(Contour, Vec<Contour>)],
+    z0: f64,
+    z1: f64,
+    chamfer: f64,
+) -> Result<Mesh> {
     if chamfer * 2.0 >= z1 - z0 {
         return Err(anyhow!(
-            "chamfer distance must be smaller than half of each part's extrusion depth"
+            "chamfer distance must be smaller than half of the part's extrusion depth"
         ));
     }
     let mut mesh = Mesh::default();
@@ -827,6 +1165,107 @@ fn extrude_groups_chamfered(
         add_loop_rings(&mut mesh, &upper_footprint, &top_inner, &cap_boundary_edges);
     }
     Ok(mesh)
+}
+
+fn common_resampled_contours(contours: &[&Contour]) -> Vec<Contour> {
+    let mut fractions = Vec::new();
+    for contour in contours {
+        fractions.extend(contour_vertex_fractions(contour));
+    }
+    fractions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    fractions.dedup_by(|a, b| (*a - *b).abs() <= 1e-10);
+    if fractions.is_empty() {
+        fractions.push(0.0);
+    }
+    contours
+        .iter()
+        .map(|contour| resample_contour(contour, &fractions))
+        .collect()
+}
+
+fn contour_vertex_fractions(contour: &Contour) -> Vec<f64> {
+    if contour.is_empty() {
+        return Vec::new();
+    }
+    let perimeter = contour
+        .iter()
+        .enumerate()
+        .map(|(i, point)| point.distance(contour[(i + 1) % contour.len()]))
+        .sum::<f64>();
+    if perimeter <= 1e-12 {
+        return vec![0.0];
+    }
+    let mut fractions = Vec::with_capacity(contour.len());
+    let mut distance = 0.0;
+    for (i, point) in contour.iter().enumerate() {
+        if i == 0 {
+            fractions.push(0.0);
+        } else {
+            fractions.push(distance / perimeter);
+        }
+        distance += point.distance(contour[(i + 1) % contour.len()]);
+    }
+    fractions
+}
+
+fn resample_contour(contour: &Contour, fractions: &[f64]) -> Contour {
+    if contour.len() < 2 || fractions.len() <= 1 {
+        return contour.clone();
+    }
+    let perimeter = contour
+        .iter()
+        .enumerate()
+        .map(|(i, point)| point.distance(contour[(i + 1) % contour.len()]))
+        .sum::<f64>();
+    if perimeter <= 1e-12 {
+        return contour.clone();
+    }
+    fractions
+        .iter()
+        .map(|fraction| {
+            let target = fraction.clamp(0.0, 1.0 - 1e-12) * perimeter;
+            let mut travelled = 0.0;
+            for (i, start) in contour.iter().enumerate() {
+                let end = contour[(i + 1) % contour.len()];
+                let length = start.distance(end);
+                if length <= 1e-12 {
+                    continue;
+                }
+                if target <= travelled + length || i == contour.len() - 1 {
+                    let t = ((target - travelled) / length).clamp(0.0, 1.0);
+                    return Point::new(
+                        start.x + (end.x - start.x) * t,
+                        start.y + (end.y - start.y) * t,
+                    );
+                }
+                travelled += length;
+            }
+            contour[0]
+        })
+        .collect()
+}
+
+fn perturb_collinear_points(contour: &mut Contour) {
+    if contour.len() < 3 {
+        return;
+    }
+    let original = contour.clone();
+    let epsilon = COLLINEAR_REPAIR_EPSILON;
+    for i in 0..contour.len() {
+        let previous = original[(i + original.len() - 1) % original.len()];
+        let current = original[i];
+        let next = original[(i + 1) % original.len()];
+        let dx = next.x - previous.x;
+        let dy = next.y - previous.y;
+        let length = (dx * dx + dy * dy).sqrt();
+        let area = (current.x - previous.x) * dy - (current.y - previous.y) * dx;
+        if length <= 1e-12 || area.abs() > 1e-10 {
+            continue;
+        }
+        let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+        contour[i].x += -dy / length * epsilon * sign;
+        contour[i].y += dx / length * epsilon * sign;
+    }
 }
 
 fn chamfer_contour(contour: &Contour, distance: f64) -> Contour {
@@ -1196,6 +1635,49 @@ fn repair_degenerate_cap(mesh: &mut Mesh, top: [u32; 3], bottom: [u32; 3]) {
     }
 }
 
+fn repair_degenerate_cap_across_layers(mesh: &mut Mesh, offsets: &[Vec<u32>], indices: &[usize]) {
+    for layer in 0..offsets.len() {
+        for tri in indices.chunks_exact(3) {
+            let flat = [tri[0], tri[1], tri[2]];
+            let vertex_indices = flat.map(|index| vertex_index(&offsets[layer], index));
+            let points = vertex_indices.map(|index| mesh.vertices[index as usize]);
+            if triangle_area2(points[0], points[1], points[2]).abs() > DEGENERATE_AREA2_THRESHOLD {
+                continue;
+            }
+            let distance =
+                |a: Vertex, b: Vertex| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+            let mut middle = 0;
+            let mut best = f64::INFINITY;
+            for i in 0..3 {
+                let j = (i + 1) % 3;
+                let k = (i + 2) % 3;
+                let score = (distance(points[i], points[j]) + distance(points[i], points[k])
+                    - distance(points[j], points[k]))
+                .abs();
+                if score < best {
+                    best = score;
+                    middle = i;
+                }
+            }
+            let j = (middle + 1) % 3;
+            let k = (middle + 2) % 3;
+            let dx = points[k].x - points[j].x;
+            let dy = points[k].y - points[j].y;
+            let length = (dx * dx + dy * dy).sqrt();
+            if length <= 1e-12 {
+                continue;
+            }
+            let nx = -dy / length * COLLINEAR_REPAIR_EPSILON;
+            let ny = dx / length * COLLINEAR_REPAIR_EPSILON;
+            for layer_offsets in offsets {
+                let index = vertex_index(layer_offsets, flat[middle]);
+                mesh.vertices[index as usize].x += nx;
+                mesh.vertices[index as usize].y += ny;
+            }
+        }
+    }
+}
+
 fn subdivide_cap_triangle(mesh: &mut Mesh, top: [u32; 3], bottom: [u32; 3], depth: u8) {
     let pa = mesh.vertices[top[0] as usize];
     let pb = mesh.vertices[top[1] as usize];
@@ -1464,7 +1946,8 @@ mod tests {
             Point::new(60.0, 30.0),
             Point::new(60.0, 20.0),
         ];
-        let mesh = extrude_groups_chamfered(&[(outer, vec![hole])], 0.0, 3.0, 0.2).unwrap();
+        let mesh =
+            extrude_groups_chamfered(&[(outer, vec![hole])], 0.0, 3.0, 0.2, true, true).unwrap();
         validate_parts(&[Part {
             name: "chamfered".into(),
             color: Rgb(0, 0, 0),
@@ -1473,6 +1956,47 @@ mod tests {
             region_index: 0,
         }])
         .unwrap();
+    }
+
+    #[test]
+    fn backed_chamfer_stays_on_exposed_outer_faces() {
+        let outer = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 50.0),
+            Point::new(0.0, 50.0),
+        ];
+        let backing =
+            extrude_groups_chamfered(&[(outer.clone(), Vec::new())], 0.0, 2.0, 1.2, true, false)
+                .unwrap();
+        let face =
+            extrude_groups_chamfered(&[(outer.clone(), Vec::new())], 2.0, 3.0, 1.2, false, true)
+                .unwrap();
+        validate_parts(&[
+            Part {
+                name: "backing".into(),
+                color: Rgb(0, 0, 0),
+                mesh: backing.clone(),
+                is_backing: true,
+                region_index: usize::MAX,
+            },
+            Part {
+                name: "face".into(),
+                color: Rgb(255, 255, 255),
+                mesh: face.clone(),
+                is_backing: false,
+                region_index: 0,
+            },
+        ])
+        .unwrap();
+        assert!(backing
+            .vertices
+            .iter()
+            .any(|v| (v.z - 2.0).abs() < 1e-9 && v.x.abs() < 1e-9 && v.y.abs() < 1e-9));
+        assert!(face
+            .vertices
+            .iter()
+            .any(|v| (v.z - 2.0).abs() < 1e-9 && v.x.abs() < 1e-9 && v.y.abs() < 1e-9));
     }
 
     #[test]
@@ -1533,6 +2057,46 @@ mod tests {
                 && (vertex.x - 50.0).abs() > 3.5
                 && (vertex.x - 50.0).abs() < 4.1
         }));
+    }
+
+    #[test]
+    fn countersink_and_exposed_chamfer_are_closed_together() {
+        let outer = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(0.0, 100.0),
+        ];
+        let hole = (0..32)
+            .map(|i| {
+                let angle = std::f64::consts::TAU * i as f64 / 32.0;
+                Point::new(50.0 + 2.5 * angle.cos(), 50.0 + 2.5 * angle.sin())
+            })
+            .collect();
+        let mesh = extrude_groups_countersunk_chamfered(
+            &[(outer, vec![hole])],
+            0.0,
+            3.0,
+            &[CountersinkHole {
+                center: Point::new(50.0, 50.0),
+                bore_radius: 2.5,
+                opening_radius: 4.0,
+                depth: 1.0,
+            }],
+            true,
+            0.2,
+            false,
+            true,
+        )
+        .unwrap();
+        validate_parts(&[Part {
+            name: "countersunk-chamfered".into(),
+            color: Rgb(0, 0, 0),
+            mesh,
+            is_backing: false,
+            region_index: 0,
+        }])
+        .unwrap();
     }
 
     #[test]

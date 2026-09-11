@@ -31,8 +31,11 @@ mesh; `--parts region` creates one part per disconnected region.
 Use `--corner-radius` to fillet the outside sign outline in the XY plane; it is
 disabled at `0` and the value is a radius in mm. Use `--chamfer` to bevel the
 outside perimeter edges and outline corners in 3D; it is also disabled at `0`
-and the value is the bevel distance in mm. Internal colour boundaries remain
-shared so chamfering does not create gaps between separately assignable parts.
+and the value is the bevel distance in mm. The value must be less than half of
+the total sign thickness. In backed mode only the exposed bottom of the backing
+and exposed top of the face are chamfered; the backing/face interface remains
+flat and shared. Internal colour boundaries remain shared so chamfering does
+not create gaps between separately assignable parts.
 
 Use repeatable `--hole` values (`corners`, `center-top`, `center-left`,
 `center-right`, or `center-bottom`) to add round through-holes. Values may also
@@ -43,10 +46,10 @@ default hole diameter is 5 mm; customize them with `--hole-inset` and
 Set `--hole-style countersunk` to add a tapered screw seat while retaining the
 through-bore. The countersink defaults to a 90 degree included angle and 1 mm
 depth; use `--countersink-depth`, `--countersink-angle`, or an explicit
-`--countersink-diameter` to customize it. `--countersink-side back` (the
-default) opens on the backing face; use `front` for the artwork face.
-Countersunk holes and `--chamfer` are currently separate options and cannot be
-used together.
+`--countersink-diameter` to customize it. `--countersink-side front` (the
+default) opens on the artwork face; use `back` for the backing face.
+Countersunk holes may be combined with `--chamfer`, but the hole inset must
+leave room for both the countersink opening radius and the outer chamfer.
 
 The 3MF contains one parent component object and a build item referencing it.
 Each colour has a stable name such as `color_01_FFCC00` and a standard display

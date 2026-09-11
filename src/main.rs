@@ -58,7 +58,7 @@ struct Args {
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "Chamfer exterior edges and corners by this distance in millimetres (mm)."
+        help = "Chamfer exposed exterior edges and corners by this distance in millimetres (mm); must be less than half the total sign thickness. In backed mode the backing/face interface stays flat."
     )]
     chamfer: f64,
     #[arg(
@@ -88,8 +88,8 @@ struct Args {
     #[arg(
         long,
         value_enum,
-        default_value_t = CountersinkSideArg::Back,
-        help = "Countersink side: front is the artwork face; back is the backing face."
+        default_value_t = CountersinkSideArg::Front,
+        help = "Countersink side: front is the artwork face (default); back is the backing face."
     )]
     countersink_side: CountersinkSideArg,
     #[arg(

@@ -115,7 +115,7 @@ impl Default for Config {
             countersink_diameter: None,
             countersink_angle: 90.0,
             countersink_depth: 1.0,
-            countersink_side: CountersinkSide::Back,
+            countersink_side: CountersinkSide::Front,
             hole_diameter: 5.0,
             hole_inset: 5.0,
             holes: Vec::new(),
@@ -274,19 +274,10 @@ fn validate_config(c: &Config) -> Result<()> {
             ));
         }
     }
-    if c.hole_style == HoleStyle::Countersunk && c.chamfer > 0.0 {
+    if c.chamfer * 2.0 >= c.thickness {
         return Err(anyhow!(
-            "--chamfer cannot be combined with --hole-style countersunk yet"
-        ));
-    }
-    let shallowest_part = if c.mode == Mode::Backed {
-        c.face_depth.min(c.thickness - c.face_depth)
-    } else {
-        c.thickness
-    };
-    if c.chamfer * 2.0 >= shallowest_part {
-        return Err(anyhow!(
-            "--chamfer must be smaller than half of the shallowest extruded layer ({shallowest_part:.3} mm)"
+            "--chamfer must be smaller than half of the total sign thickness ({:.3} mm)",
+            c.thickness
         ));
     }
     if c.hole_style == HoleStyle::Countersunk {
@@ -313,6 +304,20 @@ fn validate_config(c: &Config) -> Result<()> {
             "--hole-inset must be greater than half of --hole-diameter"
         ));
     }
+    if c.hole_style == HoleStyle::Countersunk && c.chamfer > 0.0 && !c.holes.is_empty() {
+        let opening_radius = c.countersink_diameter.map_or(
+            c.hole_diameter / 2.0
+                + c.countersink_depth * (c.countersink_angle.to_radians() / 2.0).tan(),
+            |diameter| diameter / 2.0,
+        );
+        let required_inset = c.chamfer + opening_radius;
+        if c.hole_inset <= required_inset {
+            return Err(anyhow!(
+                "--hole-inset ({:.3} mm) must exceed --chamfer plus the countersink opening radius ({required_inset:.3} mm) to keep them separate",
+                c.hole_inset
+            ));
+        }
+    }
     if c.upscale == 0 {
         return Err(anyhow!("--upscale must be at least 1"));
     }
@@ -332,4 +337,44 @@ pub fn ensure_parent(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backed_chamfer_limit_uses_total_sign_thickness() {
+        let mut config = Config {
+            input: PathBuf::from("."),
+            output: PathBuf::from("test.3mf"),
+            width: Some(100.0),
+            chamfer: 1.2,
+            ..Config::default()
+        };
+        assert!(validate_config(&config).is_ok());
+
+        config.chamfer = 1.5;
+        let error = validate_config(&config).unwrap_err().to_string();
+        assert!(error.contains("half of the total sign thickness"));
+    }
+
+    #[test]
+    fn countersink_defaults_front_and_requires_chamfer_clearance() {
+        assert_eq!(Config::default().countersink_side, CountersinkSide::Front);
+        let mut config = Config {
+            input: PathBuf::from("."),
+            output: PathBuf::from("test.3mf"),
+            width: Some(100.0),
+            hole_style: HoleStyle::Countersunk,
+            holes: vec![HolePosition::CenterTop],
+            chamfer: 0.2,
+            ..Config::default()
+        };
+        assert!(validate_config(&config).is_ok());
+
+        config.hole_inset = 3.6;
+        let error = validate_config(&config).unwrap_err().to_string();
+        assert!(error.contains("countersink opening radius"));
+    }
 }
