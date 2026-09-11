@@ -81,20 +81,34 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
         })
         .collect();
     let hole_paths: Vec<Contour> = hole_specs.iter().map(|(_, path)| path.clone()).collect();
+    let transformed_backing: Vec<Contour> = traced
+        .backing
+        .iter()
+        .map(|contour| contour.iter().copied().map(&transform).collect())
+        .collect();
+    let mut backing_groups = group_contours(&transformed_backing);
+    if config.corner_radius > 0.0 {
+        backing_groups = round_groups(&backing_groups, config.corner_radius)?;
+    }
+    let chamfer_boundaries: Vec<Contour> = backing_groups
+        .iter()
+        .map(|(outer, _)| outer.clone())
+        .collect();
+    let clip_groups = (config.corner_radius > 0.0).then(|| backing_groups.clone());
     let normalize_groups = |cs: &[Contour]| -> Vec<(Contour, Vec<Contour>)> {
         let transformed: Vec<Contour> = cs
             .iter()
             .map(|contour| contour.iter().copied().map(&transform).collect())
             .collect();
-        subtract_holes(group_contours(&transformed), &hole_paths)
+        let groups = group_contours(&transformed);
+        let groups = if let Some(clip) = clip_groups.as_ref() {
+            intersect_groups(groups, clip)
+        } else {
+            groups
+        };
+        subtract_holes(groups, &hole_paths)
     };
     if !hole_specs.is_empty() {
-        let transformed_backing: Vec<Contour> = traced
-            .backing
-            .iter()
-            .map(|contour| contour.iter().copied().map(&transform).collect())
-            .collect();
-        let backing_groups = group_contours(&transformed_backing);
         validate_hole_containment(&backing_groups, &hole_specs)?;
     }
     let depth = config.thickness;
@@ -108,8 +122,14 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
                 .map(|r| r.color)
                 .unwrap_or(traced.palette[0])
         });
-        let groups = normalize_groups(&traced.backing);
-        let mesh = extrude_groups(&groups, 0.0, depth - config.face_depth)?;
+        let groups = subtract_holes(backing_groups.clone(), &hole_paths);
+        let mesh = extrude_for_config(
+            &groups,
+            0.0,
+            depth - config.face_depth,
+            config.chamfer,
+            &chamfer_boundaries,
+        )?;
         parts.push(Part {
             name: format!("backing_{}", backing_color.hex()),
             color: backing_color,
@@ -127,12 +147,24 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
                 depth - config.face_depth,
                 depth,
                 config.parts,
+                config.chamfer,
+                &chamfer_boundaries,
             )?;
         }
     } else {
         for (ri, region) in traced.regions.iter().enumerate() {
             let groups = normalize_groups(&region.contours);
-            add_region_parts(&mut parts, region, ri, groups, 0.0, depth, config.parts)?;
+            add_region_parts(
+                &mut parts,
+                region,
+                ri,
+                groups,
+                0.0,
+                depth,
+                config.parts,
+                config.chamfer,
+                &chamfer_boundaries,
+            )?;
         }
     }
     if config.upside_down {
@@ -286,6 +318,114 @@ fn subtract_holes(
     groups_from_overlay(cleaned)
 }
 
+fn intersect_groups(
+    subject_groups: Vec<(Contour, Vec<Contour>)>,
+    clip_groups: &[(Contour, Vec<Contour>)],
+) -> Vec<(Contour, Vec<Contour>)> {
+    if subject_groups.is_empty() || clip_groups.is_empty() {
+        return Vec::new();
+    }
+    let subject = flatten_groups(&subject_groups);
+    let clips = flatten_groups(clip_groups);
+    let cleaned = subject.overlay(&clips, OverlayRule::Intersect, FillRule::EvenOdd);
+    groups_from_overlay(cleaned)
+}
+
+fn flatten_groups(groups: &[(Contour, Vec<Contour>)]) -> Vec<Vec<[f64; 2]>> {
+    groups
+        .iter()
+        .flat_map(|(outer, holes)| {
+            std::iter::once(outer)
+                .chain(holes.iter())
+                .map(|contour| contour.iter().map(|p| [p.x, p.y]).collect())
+        })
+        .collect()
+}
+
+fn round_groups(
+    groups: &[(Contour, Vec<Contour>)],
+    radius: f64,
+) -> Result<Vec<(Contour, Vec<Contour>)>> {
+    groups
+        .iter()
+        .map(|(outer, holes)| Ok((fillet_contour(outer, radius)?, holes.clone())))
+        .collect()
+}
+
+fn fillet_contour(contour: &Contour, radius: f64) -> Result<Contour> {
+    if contour.len() < 3 || radius <= 0.0 {
+        return Ok(contour.clone());
+    }
+    let orientation = signed_area(contour).signum();
+    if orientation == 0.0 {
+        return Ok(contour.clone());
+    }
+    let mut result = Vec::new();
+    for i in 0..contour.len() {
+        let prev = contour[(i + contour.len() - 1) % contour.len()];
+        let current = contour[i];
+        let next = contour[(i + 1) % contour.len()];
+        let incoming = Point::new(prev.x - current.x, prev.y - current.y);
+        let outgoing = Point::new(next.x - current.x, next.y - current.y);
+        let prev_len = current.distance(prev);
+        let next_len = current.distance(next);
+        if prev_len <= 1e-9 || next_len <= 1e-9 {
+            result.push(current);
+            continue;
+        }
+        let turn = (current.x - prev.x) * (next.y - current.y)
+            - (current.y - prev.y) * (next.x - current.x);
+        if turn * orientation <= 1e-9 {
+            result.push(current);
+            continue;
+        }
+        let a = Point::new(incoming.x / prev_len, incoming.y / prev_len);
+        let b = Point::new(outgoing.x / next_len, outgoing.y / next_len);
+        let dot = (a.x * b.x + a.y * b.y).clamp(-1.0, 1.0);
+        let angle = dot.acos();
+        if angle <= 1e-6 || angle >= 170.0_f64.to_radians() {
+            result.push(current);
+            continue;
+        }
+        let tangent_distance = radius / (angle / 2.0).tan();
+        if tangent_distance * 2.0 >= prev_len.min(next_len) {
+            return Err(anyhow!(
+                "--corner-radius {:.3} mm is too large for a sign corner; reduce it below {:.3} mm",
+                radius,
+                tangent_distance.min(prev_len.min(next_len) / 2.0)
+            ));
+        }
+        let bisector = Point::new(a.x + b.x, a.y + b.y);
+        let bisector_len = (bisector.x * bisector.x + bisector.y * bisector.y).sqrt();
+        if bisector_len <= 1e-9 {
+            result.push(current);
+            continue;
+        }
+        let center_distance = radius / (angle / 2.0).sin();
+        let center = Point::new(
+            current.x + bisector.x / bisector_len * center_distance,
+            current.y + bisector.y / bisector_len * center_distance,
+        );
+        let start = Point::new(
+            current.x + a.x * tangent_distance,
+            current.y + a.y * tangent_distance,
+        );
+        let sweep = std::f64::consts::PI - angle;
+        let start_angle = (start.y - center.y).atan2(start.x - center.x);
+        let segments = ((radius * sweep / 0.25).ceil() as usize).clamp(3, 24);
+        result.push(start);
+        for step in 1..=segments {
+            let theta = start_angle + orientation * sweep * step as f64 / segments as f64;
+            result.push(Point::new(
+                center.x + radius * theta.cos(),
+                center.y + radius * theta.sin(),
+            ));
+        }
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn add_region_parts(
     out: &mut Vec<Part>,
     region: &Region,
@@ -294,9 +434,11 @@ fn add_region_parts(
     z0: f64,
     z1: f64,
     mode: PartsMode,
+    chamfer: f64,
+    chamfer_boundaries: &[Contour],
 ) -> Result<()> {
     if mode == PartsMode::Color {
-        let mesh = extrude_groups(&groups, z0, z1)?;
+        let mesh = extrude_for_config(&groups, z0, z1, chamfer, chamfer_boundaries)?;
         out.push(Part {
             name: format!("color_{:02}_{}", region.color_index + 1, region.color.hex()),
             color: region.color,
@@ -306,7 +448,7 @@ fn add_region_parts(
         });
     } else {
         for (i, g) in groups.into_iter().enumerate() {
-            let mesh = extrude_groups(&[g], z0, z1)?;
+            let mesh = extrude_for_config(&[g], z0, z1, chamfer, chamfer_boundaries)?;
             out.push(Part {
                 name: format!(
                     "color_{:02}_{}_region_{:03}",
@@ -370,6 +512,355 @@ fn groups_from_overlay(cleaned: Vec<Vec<Vec<[f64; 2]>>>) -> Vec<(Contour, Vec<Co
         groups.push((outer, holes));
     }
     groups
+}
+
+fn extrude_for_config(
+    groups: &[(Contour, Vec<Contour>)],
+    z0: f64,
+    z1: f64,
+    chamfer: f64,
+    chamfer_boundaries: &[Contour],
+) -> Result<Mesh> {
+    if chamfer <= 0.0 || chamfer_boundaries.is_empty() {
+        return extrude_groups(groups, z0, z1);
+    }
+    let mut mesh = Mesh::default();
+    for group in groups {
+        let use_chamfer = chamfer_boundaries
+            .iter()
+            .any(|boundary| contours_match(&group.0, boundary));
+        let piece = if use_chamfer {
+            extrude_groups_chamfered(std::slice::from_ref(group), z0, z1, chamfer)?
+        } else {
+            extrude_groups(std::slice::from_ref(group), z0, z1)?
+        };
+        append_mesh(&mut mesh, piece);
+    }
+    Ok(mesh)
+}
+
+fn contours_match(a: &Contour, b: &Contour) -> bool {
+    let Some(a_bounds) = contour_bounds(std::slice::from_ref(a)) else {
+        return false;
+    };
+    let Some(b_bounds) = contour_bounds(std::slice::from_ref(b)) else {
+        return false;
+    };
+    let scale = a_bounds
+        .2
+        .abs()
+        .max(a_bounds.3.abs())
+        .max(b_bounds.2.abs())
+        .max(b_bounds.3.abs())
+        .max(1.0);
+    let bounds_match = (0..4).all(|i| {
+        let a_value = [a_bounds.0, a_bounds.1, a_bounds.2, a_bounds.3][i];
+        let b_value = [b_bounds.0, b_bounds.1, b_bounds.2, b_bounds.3][i];
+        (a_value - b_value).abs() <= scale * 1e-7
+    });
+    bounds_match && (signed_area(a).abs() - signed_area(b).abs()).abs() <= scale * scale * 1e-7
+}
+
+fn append_mesh(destination: &mut Mesh, source: Mesh) {
+    let base = destination.vertices.len() as u32;
+    destination.vertices.extend(source.vertices);
+    destination
+        .triangles
+        .extend(source.triangles.into_iter().map(|t| Triangle {
+            v1: t.v1 + base,
+            v2: t.v2 + base,
+            v3: t.v3 + base,
+        }));
+}
+
+fn extrude_groups_chamfered(
+    groups: &[(Contour, Vec<Contour>)],
+    z0: f64,
+    z1: f64,
+    chamfer: f64,
+) -> Result<Mesh> {
+    if z1 <= z0 {
+        return Err(anyhow!("extrusion depth must be positive"));
+    }
+    if chamfer * 2.0 >= z1 - z0 {
+        return Err(anyhow!(
+            "chamfer distance must be smaller than half of each part's extrusion depth"
+        ));
+    }
+    let mut mesh = Mesh::default();
+    for (outer, holes) in groups {
+        let mut loops = Vec::with_capacity(1 + holes.len());
+        loops.push(chamfer_contour(outer, chamfer));
+        loops.extend(holes.iter().cloned());
+        let mut inner_loops = Vec::with_capacity(loops.len());
+        inner_loops.push(offset_contour(&loops[0], chamfer).unwrap_or_else(|_| loops[0].clone()));
+        inner_loops.extend(holes.iter().cloned());
+        let lower_footprint = push_layer(&mut mesh, &loops, z0 + chamfer);
+        let upper_footprint = push_layer(&mut mesh, &loops, z1 - chamfer);
+        let bottom_inner = push_layer(&mut mesh, &inner_loops, z0);
+        let top_inner = push_layer(&mut mesh, &inner_loops, z1);
+        let cap_indices = triangulate_loops(&inner_loops)?;
+        let cap_boundary_edges = boundary_edges_from_indices(&cap_indices);
+        if !boundary_edges_form_loops(&cap_boundary_edges, &inner_loops) {
+            return extrude_groups(groups, z0, z1);
+        }
+        add_cap_triangles(&mut mesh, &bottom_inner, &cap_indices, false);
+        add_cap_triangles(&mut mesh, &top_inner, &cap_indices, true);
+        add_loop_rings(
+            &mut mesh,
+            &loops,
+            &lower_footprint,
+            &upper_footprint,
+            &cap_boundary_edges,
+        );
+        add_loop_rings(
+            &mut mesh,
+            &loops,
+            &bottom_inner,
+            &lower_footprint,
+            &cap_boundary_edges,
+        );
+        add_loop_rings(
+            &mut mesh,
+            &loops,
+            &upper_footprint,
+            &top_inner,
+            &cap_boundary_edges,
+        );
+    }
+    Ok(mesh)
+}
+
+fn chamfer_contour(contour: &Contour, distance: f64) -> Contour {
+    if contour.len() < 3 || distance <= 0.0 {
+        return contour.clone();
+    }
+    let orientation = signed_area(contour).signum();
+    if orientation == 0.0 {
+        return contour.clone();
+    }
+    let mut result = Vec::with_capacity(contour.len() * 2);
+    for i in 0..contour.len() {
+        let prev = contour[(i + contour.len() - 1) % contour.len()];
+        let current = contour[i];
+        let next = contour[(i + 1) % contour.len()];
+        let prev_len = current.distance(prev);
+        let next_len = current.distance(next);
+        if prev_len <= 1e-9 || next_len <= 1e-9 {
+            result.push(current);
+            continue;
+        }
+        let turn = (current.x - prev.x) * (next.y - current.y)
+            - (current.y - prev.y) * (next.x - current.x);
+        let a = Point::new(
+            (prev.x - current.x) / prev_len,
+            (prev.y - current.y) / prev_len,
+        );
+        let b = Point::new(
+            (next.x - current.x) / next_len,
+            (next.y - current.y) / next_len,
+        );
+        let angle = (a.x * b.x + a.y * b.y).clamp(-1.0, 1.0).acos();
+        let is_sharp_convex =
+            turn * orientation > 1e-9 && angle < 170.0_f64.to_radians() && angle > 1e-6;
+        if !is_sharp_convex {
+            result.push(current);
+            continue;
+        }
+        let cut = distance.min(prev_len.min(next_len) * 0.49);
+        result.push(Point::new(current.x + a.x * cut, current.y + a.y * cut));
+        result.push(Point::new(current.x + b.x * cut, current.y + b.y * cut));
+    }
+    result
+}
+
+fn offset_contour(contour: &Contour, distance: f64) -> Result<Contour> {
+    if contour.len() < 3 || distance <= 0.0 {
+        return Ok(contour.clone());
+    }
+    let material_side = signed_area(contour).signum();
+    if material_side == 0.0 {
+        return Err(anyhow!("cannot offset a zero-area contour"));
+    }
+    let mut result = Vec::with_capacity(contour.len());
+    for i in 0..contour.len() {
+        let prev = contour[(i + contour.len() - 1) % contour.len()];
+        let current = contour[i];
+        let next = contour[(i + 1) % contour.len()];
+        let first = shifted_line(prev, current, material_side * distance)?;
+        let second = shifted_line(current, next, material_side * distance)?;
+        result.push(line_intersection(first, second)?);
+    }
+    let area = signed_area(&result);
+    if !area.is_finite() || area.abs() <= 1e-9 || area.signum() != material_side {
+        return Err(anyhow!("contour offset is invalid"));
+    }
+    Ok(result)
+}
+
+fn shifted_line(a: Point, b: Point, distance: f64) -> Result<(Point, Point)> {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= 1e-9 {
+        return Err(anyhow!("contour contains a zero-length edge"));
+    }
+    let normal = Point::new(-dy / length * distance, dx / length * distance);
+    Ok((
+        Point::new(a.x + normal.x, a.y + normal.y),
+        Point::new(b.x + normal.x, b.y + normal.y),
+    ))
+}
+
+fn line_intersection(first: (Point, Point), second: (Point, Point)) -> Result<Point> {
+    let (a, b) = first;
+    let (c, d) = second;
+    let r = Point::new(b.x - a.x, b.y - a.y);
+    let s = Point::new(d.x - c.x, d.y - c.y);
+    let denominator = r.x * s.y - r.y * s.x;
+    if denominator.abs() <= 1e-10 {
+        return Err(anyhow!("parallel contour offset edges"));
+    }
+    let q_minus_a = Point::new(c.x - a.x, c.y - a.y);
+    let t = (q_minus_a.x * s.y - q_minus_a.y * s.x) / denominator;
+    Ok(Point::new(a.x + t * r.x, a.y + t * r.y))
+}
+
+fn push_layer(mesh: &mut Mesh, loops: &[Contour], z: f64) -> Vec<u32> {
+    let mut offsets = Vec::with_capacity(loops.len());
+    for contour in loops {
+        offsets.push(mesh.vertices.len() as u32);
+        for p in contour {
+            mesh.vertices.push(Vertex { x: p.x, y: p.y, z });
+        }
+    }
+    offsets
+}
+
+fn triangulate_loops(loops: &[Contour]) -> Result<Vec<usize>> {
+    let mut coords = Vec::new();
+    let mut hole_indices = Vec::new();
+    let mut count = 0;
+    for (li, contour) in loops.iter().enumerate() {
+        if li > 0 {
+            hole_indices.push(count);
+        }
+        count += contour.len();
+        for p in contour {
+            coords.push(p.x);
+            coords.push(p.y);
+        }
+    }
+    earcutr::earcut(&coords, &hole_indices, 2).map_err(|e| anyhow!("triangulation failed: {e:?}"))
+}
+
+fn add_cap_triangles(mesh: &mut Mesh, offsets: &[u32], indices: &[usize], top: bool) {
+    for tri in indices.chunks_exact(3) {
+        let a = vertex_index(offsets, tri[0]);
+        let b = vertex_index(offsets, tri[1]);
+        let c = vertex_index(offsets, tri[2]);
+        mesh.triangles.push(if top {
+            Triangle {
+                v1: a,
+                v2: b,
+                v3: c,
+            }
+        } else {
+            Triangle {
+                v1: c,
+                v2: b,
+                v3: a,
+            }
+        });
+    }
+}
+
+fn boundary_edges_from_indices(indices: &[usize]) -> Vec<(usize, usize)> {
+    let mut edges: HashMap<(usize, usize), (usize, (usize, usize))> = HashMap::new();
+    for tri in indices.chunks_exact(3) {
+        for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let key = (a.min(b), a.max(b));
+            let entry = edges.entry(key).or_insert((0, (a, b)));
+            entry.0 += 1;
+        }
+    }
+    edges
+        .into_values()
+        .filter_map(|(count, directed)| (count == 1).then_some(directed))
+        .collect()
+}
+
+fn boundary_edges_form_loops(edges: &[(usize, usize)], loops: &[Contour]) -> bool {
+    let mut degrees: HashMap<usize, usize> = HashMap::new();
+    for &(a, b) in edges {
+        *degrees.entry(a).or_default() += 1;
+        *degrees.entry(b).or_default() += 1;
+    }
+    let expected = loops.iter().map(|contour| contour.len()).sum::<usize>();
+    degrees.len() == expected && degrees.values().all(|degree| *degree == 2)
+}
+
+fn vertex_index(offsets: &[u32], flat_index: usize) -> u32 {
+    let Some(first) = offsets.first().copied() else {
+        return flat_index as u32;
+    };
+    let absolute = first as usize + flat_index;
+    for i in 0..offsets.len() {
+        let next = offsets
+            .get(i + 1)
+            .copied()
+            .map(|value| value as usize)
+            .unwrap_or(usize::MAX);
+        if absolute < next {
+            return absolute as u32;
+        }
+    }
+    absolute as u32
+}
+
+fn add_loop_rings(
+    mesh: &mut Mesh,
+    loops: &[Contour],
+    lower: &[u32],
+    upper: &[u32],
+    edges: &[(usize, usize)],
+) {
+    for &(flat_a, flat_b) in edges {
+        let Some((li, a_local)) = flat_vertex(loops, flat_a) else {
+            continue;
+        };
+        let Some((other_li, b_local)) = flat_vertex(loops, flat_b) else {
+            continue;
+        };
+        if li != other_li {
+            continue;
+        }
+        let a = lower[li] + a_local as u32;
+        let b = lower[li] + b_local as u32;
+        let at = upper[li] + a_local as u32;
+        let bt = upper[li] + b_local as u32;
+        mesh.triangles.push(Triangle {
+            v1: a,
+            v2: b,
+            v3: bt,
+        });
+        mesh.triangles.push(Triangle {
+            v1: a,
+            v2: bt,
+            v3: at,
+        });
+    }
+}
+
+fn flat_vertex(loops: &[Contour], flat_index: usize) -> Option<(usize, usize)> {
+    let mut start = 0;
+    for (li, contour) in loops.iter().enumerate() {
+        if flat_index < start + contour.len() {
+            return Some((li, flat_index - start));
+        }
+        start += contour.len();
+    }
+    None
 }
 
 fn extrude_groups(groups: &[(Contour, Vec<Contour>)], z0: f64, z1: f64) -> Result<Mesh> {
@@ -779,5 +1270,48 @@ mod tests {
         .unwrap();
         let removed_area = signed_area(&groups[0].1[0]).abs();
         assert!((volume(&mesh) - (100.0 * 100.0 - removed_area) * 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn chamfered_rectangle_with_hole_is_closed() {
+        let outer = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 50.0),
+            Point::new(0.0, 50.0),
+        ];
+        let hole = vec![
+            Point::new(40.0, 20.0),
+            Point::new(40.0, 30.0),
+            Point::new(60.0, 30.0),
+            Point::new(60.0, 20.0),
+        ];
+        let mesh = extrude_groups_chamfered(&[(outer, vec![hole])], 0.0, 3.0, 0.2).unwrap();
+        validate_parts(&[Part {
+            name: "chamfered".into(),
+            color: Rgb(0, 0, 0),
+            mesh,
+            is_backing: true,
+            region_index: 0,
+        }])
+        .unwrap();
+    }
+
+    #[test]
+    fn fillet_rounds_a_square_outline() {
+        let square = vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 50.0),
+            Point::new(0.0, 50.0),
+        ];
+        let rounded = fillet_contour(&square, 5.0).unwrap();
+        assert!(rounded.len() > square.len());
+        let bounds = contour_bounds(std::slice::from_ref(&rounded)).unwrap();
+        assert!((bounds.0 - 0.0).abs() < 1e-9);
+        assert!((bounds.1 - 0.0).abs() < 1e-9);
+        assert!((bounds.2 - 100.0).abs() < 1e-9);
+        assert!((bounds.3 - 50.0).abs() < 1e-9);
+        assert!(signed_area(&rounded) < signed_area(&square));
     }
 }

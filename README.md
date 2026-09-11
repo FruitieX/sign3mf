@@ -13,6 +13,7 @@ cargo build --release
 sign3mf --input warning.png --output warning.3mf --width 150
 sign3mf --input warning.jpg --output warning.3mf --height 120 --mode backed --face-depth 1.0 --remove-background '#FFFFFF' --background-tolerance 20 --trim --upscale 4 --filter cubic --svg-out warning.svg
 sign3mf --input plate.png --output plate.3mf --width 180 --hole corners --hole-diameter 5
+sign3mf --input plate.png --output rounded.3mf --width 180 --corner-radius 4 --chamfer 0.25
 ```
 
 Exactly one of `--width` and `--height` is required; both are measured in mm.
@@ -25,6 +26,12 @@ colour the full requested thickness. `--mode backed` creates a separately
 named backing from the visible artwork and puts each colour in the remaining
 face depth in mm. `--parts color` groups disconnected shells of one colour into one
 mesh; `--parts region` creates one part per disconnected region.
+
+Use `--corner-radius` to fillet the outside sign outline in the XY plane; it is
+disabled at `0` and the value is a radius in mm. Use `--chamfer` to bevel the
+outside perimeter edges and outline corners in 3D; it is also disabled at `0`
+and the value is the bevel distance in mm. Internal colour boundaries remain
+shared so chamfering does not create gaps between separately assignable parts.
 
 Use repeatable `--hole` values (`corners`, `center-top`, `center-left`,
 `center-right`, or `center-bottom`) to add round through-holes. Values may also

@@ -51,6 +51,18 @@ struct Args {
     face_depth: f64,
     #[arg(
         long,
+        default_value_t = 0.0,
+        help = "Round the sign outline corners with this fillet radius in millimetres (mm)."
+    )]
+    corner_radius: f64,
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Chamfer exterior edges and corners by this distance in millimetres (mm)."
+    )]
+    chamfer: f64,
+    #[arg(
+        long,
         default_value_t = 5.0,
         help = "Round screw-hole diameter in millimetres (mm). Used with --hole."
     )]
@@ -174,6 +186,8 @@ fn main() -> Result<()> {
         },
         upside_down: matches!(args.orientation, OrientationArg::UpsideDown),
         face_depth: args.face_depth,
+        corner_radius: args.corner_radius,
+        chamfer: args.chamfer,
         hole_diameter: args.hole_diameter,
         hole_inset: args.hole_inset,
         holes: args

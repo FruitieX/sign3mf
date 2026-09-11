@@ -57,6 +57,8 @@ pub struct Config {
     pub mode: Mode,
     pub upside_down: bool,
     pub face_depth: f64,
+    pub corner_radius: f64,
+    pub chamfer: f64,
     pub hole_diameter: f64,
     pub hole_inset: f64,
     pub holes: Vec<HolePosition>,
@@ -90,6 +92,8 @@ impl Default for Config {
             mode: Mode::Backed,
             upside_down: true,
             face_depth: 1.0,
+            corner_radius: 0.0,
+            chamfer: 0.0,
             hole_diameter: 5.0,
             hole_inset: 5.0,
             holes: Vec::new(),
@@ -223,6 +227,22 @@ fn validate_config(c: &Config) -> Result<()> {
     }
     if c.mode == Mode::FullDepth && c.backing_color.is_some() {
         return Err(anyhow!("--backing-color is only valid with --mode backed"));
+    }
+    if !c.corner_radius.is_finite() || c.corner_radius < 0.0 {
+        return Err(anyhow!("--corner-radius must be non-negative"));
+    }
+    if !c.chamfer.is_finite() || c.chamfer < 0.0 {
+        return Err(anyhow!("--chamfer must be non-negative"));
+    }
+    let shallowest_part = if c.mode == Mode::Backed {
+        c.face_depth.min(c.thickness - c.face_depth)
+    } else {
+        c.thickness
+    };
+    if c.chamfer * 2.0 >= shallowest_part {
+        return Err(anyhow!(
+            "--chamfer must be smaller than half of the shallowest extruded layer ({shallowest_part:.3} mm)"
+        ));
     }
     if !c.hole_diameter.is_finite() || c.hole_diameter <= 0.0 {
         return Err(anyhow!("--hole-diameter must be positive"));
