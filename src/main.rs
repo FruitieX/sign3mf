@@ -41,7 +41,7 @@ struct Args {
     palette: Option<String>,
     #[arg(long, value_enum, default_value_t=ModeArg::Backed, help = "Geometry mode: backed uses a backing layer plus a colored face; full-depth extrudes each color through the full thickness.")]
     mode: ModeArg,
-    #[arg(long, value_enum, default_value_t = OrientationArg::UpsideDown, help = "Planar sign orientation. Default: upside-down.")]
+    #[arg(long, value_enum, default_value_t = OrientationArg::UpsideDown, help = "Print orientation: upside-down places the colored face against the build plate without rotating X/Y. Default: upside-down.")]
     orientation: OrientationArg,
     #[arg(
         long,

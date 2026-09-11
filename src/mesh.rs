@@ -45,16 +45,10 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
     } else {
         requested / source_h
     };
-    let model_width = source_w * scale;
-    let model_height = source_h * scale;
     let transform = |p: Point| {
         let x = (p.x - raw_bounds.0) * scale;
         let y = (p.y - raw_bounds.1) * scale;
-        if config.upside_down {
-            Point::new(model_width - x, model_height - y)
-        } else {
-            Point::new(x, y)
-        }
+        Point::new(x, y)
     };
     let normalize_groups = |cs: &[Contour]| -> Vec<(Contour, Vec<Contour>)> {
         group_contours(cs)
@@ -106,6 +100,16 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
         for (ri, region) in traced.regions.iter().enumerate() {
             let groups = normalize_groups(&region.contours);
             add_region_parts(&mut parts, region, ri, groups, 0.0, depth, config.parts)?;
+        }
+    }
+    if config.upside_down {
+        for part in &mut parts {
+            for vertex in &mut part.mesh.vertices {
+                vertex.z = depth - vertex.z;
+            }
+            for triangle in &mut part.mesh.triangles {
+                std::mem::swap(&mut triangle.v2, &mut triangle.v3);
+            }
         }
     }
     Ok(parts)
