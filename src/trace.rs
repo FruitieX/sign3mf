@@ -273,8 +273,11 @@ fn turn_key(a: Key, b: Key, c: Key) -> (i32, i32, i32) {
     let vx = c.0 - b.0;
     let vy = c.1 - b.1;
     let cross = ux * vy - uy * vx;
+    // Boundaries are emitted with the material on their right. At a diagonal
+    // pixel junction the clockwise turn keeps the two faces on separate sides
+    // instead of splicing their contours together.
     let dot = ux * vx + uy * vy; // straight first, then left turns, deterministic tie
-    (if dot > 0 { 0 } else { 1 }, -cross, vx + vy)
+    (if dot > 0 { 0 } else { 1 }, cross, vx + vy)
 }
 
 /// Optional VTracer adapter for applications that want to inspect the same

@@ -26,9 +26,13 @@ pub fn write_svg(path: &Path, parts: &[Part]) -> Result<()> {
             if (a.z - top).abs() > 1e-7 || (b.z - top).abs() > 1e-7 || (c.z - top).abs() > 1e-7 {
                 continue;
             }
+            // Mesh coordinates use Y-up; SVG uses Y-down.
+            let ay = h - a.y;
+            let by = h - b.y;
+            let cy = h - c.y;
             s.push_str(&format!(
                 r#"<path d="M {:.5},{:.5} L {:.5},{:.5} L {:.5},{:.5} Z" fill="{}" data-part="{}"/>"#,
-                a.x, a.y, b.x, b.y, c.x, c.y, part.color.html(), part.name
+                a.x, ay, b.x, by, c.x, cy, part.color.html(), part.name
             ));
         }
     }

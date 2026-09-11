@@ -200,7 +200,29 @@ fn quantize(
     } else {
         let mut v: Vec<_> = counts.iter().map(|(c, n)| (*c, *n)).collect();
         v.sort_by_key(|(color, count)| (std::cmp::Reverse(*count), *color));
-        v.into_iter().take(max_colors).map(|x| x.0).collect()
+        // JPEG/WebP artwork commonly has many compression shades around one
+        // intended flat color. Spend the palette budget on distinct
+        // representatives instead of those near-duplicates. The threshold is
+        // intentionally a little wider than ordinary JPEG ringing so a flat
+        // sign background stays one region.
+        let total: usize = v.iter().map(|(_, count)| *count).sum();
+        let significant_count = total / 20; // 5% of visible pixels
+        let mut selected = Vec::new();
+        for (color, count) in v {
+            if selected.len() >= 2 && count < significant_count {
+                continue;
+            }
+            if selected
+                .iter()
+                .all(|chosen: &Rgb| chosen.distance(color) >= 24)
+            {
+                selected.push(color);
+                if selected.len() == max_colors {
+                    break;
+                }
+            }
+        }
+        selected
     };
     if palette.is_empty() {
         palette.push(Rgb(0, 0, 0));

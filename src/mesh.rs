@@ -1,8 +1,12 @@
 use crate::color::Rgb;
-use crate::geometry::{bounds as contour_bounds, point_in_polygon, signed_area, Contour, Point};
+use crate::geometry::{bounds as contour_bounds, signed_area, simplify_collinear, Contour, Point};
 use crate::trace::{Region, Traced};
 use crate::{Config, Mode, PartsMode};
 use anyhow::{anyhow, Result};
+use i_overlay::core::fill_rule::FillRule;
+use i_overlay::core::overlay_rule::OverlayRule;
+use i_overlay::float::single::SingleFloatOverlay;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vertex {
@@ -43,9 +47,18 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
     };
     let transform =
         |p: Point| Point::new((p.x - raw_bounds.0) * scale, (p.y - raw_bounds.1) * scale);
-    let normalize = |cs: &[Contour]| -> Vec<Contour> {
-        cs.iter()
-            .map(|c| c.iter().copied().map(&transform).collect())
+    let normalize_groups = |cs: &[Contour]| -> Vec<(Contour, Vec<Contour>)> {
+        group_contours(cs)
+            .into_iter()
+            .map(|(outer, holes)| {
+                (
+                    outer.into_iter().map(&transform).collect(),
+                    holes
+                        .into_iter()
+                        .map(|hole| hole.into_iter().map(&transform).collect())
+                        .collect(),
+                )
+            })
             .collect()
     };
     let depth = config.thickness;
@@ -59,7 +72,7 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
                 .map(|r| r.color)
                 .unwrap_or(traced.palette[0])
         });
-        let groups = group_contours(&normalize(&traced.backing));
+        let groups = normalize_groups(&traced.backing);
         let mesh = extrude_groups(&groups, 0.0, depth - config.face_depth)?;
         parts.push(Part {
             name: format!("backing_{}", backing_color.hex()),
@@ -69,7 +82,7 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
             region_index: usize::MAX,
         });
         for (ri, region) in traced.regions.iter().enumerate() {
-            let groups = group_contours(&normalize(&region.contours));
+            let groups = normalize_groups(&region.contours);
             add_region_parts(
                 &mut parts,
                 region,
@@ -82,7 +95,7 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
         }
     } else {
         for (ri, region) in traced.regions.iter().enumerate() {
-            let groups = group_contours(&normalize(&region.contours));
+            let groups = normalize_groups(&region.contours);
             add_region_parts(&mut parts, region, ri, groups, 0.0, depth, config.parts)?;
         }
     }
@@ -137,36 +150,47 @@ fn add_region_parts(
 }
 
 fn group_contours(contours: &[Contour]) -> Vec<(Contour, Vec<Contour>)> {
-    let mut outers: Vec<(Contour, Vec<Contour>)> = Vec::new();
-    let mut holes = Vec::new();
-    for c in contours {
-        if c.len() < 3 {
+    if contours.is_empty() {
+        return Vec::new();
+    }
+
+    // The pixel tracer can emit several loops meeting at a lattice vertex. A
+    // direct containment pass cannot distinguish those touching loops from
+    // genuine holes, and earcut then bridges the wrong boundaries with very
+    // long triangles. Run the complete contour set through the polygon
+    // overlay engine first. It resolves touching/self-intersecting boundaries
+    // and returns one outer contour followed by its holes for each connected
+    // filled component.
+    let subject: Vec<Vec<[f64; 2]>> = contours
+        .iter()
+        .filter(|c| c.len() >= 3)
+        .map(|c| c.iter().map(|p| [p.x, p.y]).collect())
+        .collect();
+    if subject.is_empty() {
+        return Vec::new();
+    }
+    let empty_clip: Vec<[f64; 2]> = Vec::new();
+    let cleaned = subject.overlay(&empty_clip, OverlayRule::Union, FillRule::EvenOdd);
+    let mut groups = Vec::new();
+    for shape in cleaned {
+        let mut loops = shape.into_iter().filter(|c| c.len() >= 3);
+        let Some(outer) = loops.next() else {
             continue;
-        }
-        if signed_area(c) < 0.0 {
-            outers.push((c.clone(), Vec::new()));
-        } else {
-            holes.push(c.clone());
-        }
+        };
+        let mut outer: Contour = outer.into_iter().map(|p| Point::new(p[0], p[1])).collect();
+        simplify_collinear(&mut outer, 1e-9);
+        let holes = loops
+            .map(|hole| {
+                let mut contour: Contour =
+                    hole.into_iter().map(|p| Point::new(p[0], p[1])).collect();
+                simplify_collinear(&mut contour, 1e-9);
+                contour
+            })
+            .filter(|hole: &Contour| hole.len() >= 3)
+            .collect();
+        groups.push((outer, holes));
     }
-    // Pixel boundary extraction gives clockwise outer loops and counterclockwise
-    // hole loops.  Assign holes by containment, then normalize winding for earcut.
-    for h in holes {
-        if let Some((_, hs)) = outers.iter_mut().find(|(o, _)| point_in_polygon(h[0], o)) {
-            hs.push(h);
-        }
-    }
-    for (o, hs) in outers.iter_mut() {
-        if signed_area(o) < 0.0 {
-            o.reverse();
-        }
-        for h in hs.iter_mut() {
-            if signed_area(h) > 0.0 {
-                h.reverse();
-            }
-        }
-    }
-    outers
+    groups
 }
 
 fn extrude_groups(groups: &[(Contour, Vec<Contour>)], z0: f64, z1: f64) -> Result<Mesh> {
@@ -193,6 +217,26 @@ fn extrude_groups(groups: &[(Contour, Vec<Contour>)], z0: f64, z1: f64) -> Resul
         }
         let indices = earcutr::earcut(&coords, &hole_indices, 2)
             .map_err(|e| anyhow!("triangulation failed: {e:?}"))?;
+        // Earcut may discard a lattice vertex while curing a local
+        // intersection. Build the walls from the boundary edges that the cap
+        // triangulation actually retained; using every source contour edge in
+        // that case leaves an open shell and makes slicers show z-fighting.
+        let raw_indices: Vec<[usize; 3]> = indices
+            .chunks_exact(3)
+            .map(|tri| [tri[0], tri[1], tri[2]])
+            .collect();
+        let mut cap_edges: HashMap<(usize, usize), (usize, (usize, usize))> = HashMap::new();
+        for [a, b, c] in &raw_indices {
+            for &(a, b) in &[(a, b), (b, c), (c, a)] {
+                let key = (*a.min(b), *a.max(b));
+                let entry = cap_edges.entry(key).or_insert((0, (*a, *b)));
+                entry.0 += 1;
+            }
+        }
+        let boundary_edges: Vec<(usize, usize)> = cap_edges
+            .into_values()
+            .filter_map(|(count, directed)| (count == 1).then_some(directed))
+            .collect();
         let base = mesh.vertices.len() as u32;
         for c in &loops {
             for p in c {
@@ -213,62 +257,188 @@ fn extrude_groups(groups: &[(Contour, Vec<Contour>)], z0: f64, z1: f64) -> Resul
             }
         }
         let total = count as u32;
-        for tri in indices.chunks_exact(3) {
-            let a = base + tri[0] as u32;
-            let b = base + tri[1] as u32;
-            let c = base + tri[2] as u32;
-            let pa = mesh.vertices[a as usize];
-            let pb = mesh.vertices[b as usize];
-            let pc = mesh.vertices[c as usize];
-            let cross = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x);
-            if cross >= 0.0 {
-                mesh.triangles.push(Triangle {
-                    v1: a + total,
-                    v2: b + total,
-                    v3: c + total,
-                });
-                mesh.triangles.push(Triangle {
-                    v1: c,
-                    v2: b,
-                    v3: a,
-                });
-            } else {
-                mesh.triangles.push(Triangle {
-                    v1: c + total,
-                    v2: b + total,
-                    v3: a + total,
-                });
-                mesh.triangles.push(Triangle {
-                    v1: a,
-                    v2: b,
-                    v3: c,
-                });
+        for tri in &raw_indices {
+            let cross = triangle_area2(
+                mesh.vertices[base as usize + tri[0]],
+                mesh.vertices[base as usize + tri[1]],
+                mesh.vertices[base as usize + tri[2]],
+            );
+            if cross.abs() <= 1e-10 {
+                repair_collinear_triangle(&mut mesh, base, total, *tri);
             }
         }
-        let mut offset = 0u32;
-        for loop_points in &loops {
-            let n = loop_points.len();
-            for i in 0..n {
-                let j = (i + 1) % n;
-                let a = base + offset + i as u32;
-                let b = base + offset + j as u32;
-                let at = a + total;
-                let bt = b + total;
-                mesh.triangles.push(Triangle {
-                    v1: a,
-                    v2: b,
-                    v3: bt,
-                });
-                mesh.triangles.push(Triangle {
-                    v1: a,
-                    v2: bt,
-                    v3: at,
-                });
-            }
-            offset += n as u32;
+
+        for [a, b, c] in raw_indices {
+            let a = base + a as u32;
+            let b = base + b as u32;
+            let c = base + c as u32;
+            let top = [a + total, b + total, c + total];
+            let bottom = [c, b, a];
+            subdivide_cap_triangle(&mut mesh, top, bottom, 0);
+        }
+        for (a, b) in boundary_edges {
+            let a = base + a as u32;
+            let b = base + b as u32;
+            let at = a + total;
+            let bt = b + total;
+            mesh.triangles.push(Triangle {
+                v1: a,
+                v2: b,
+                v3: bt,
+            });
+            mesh.triangles.push(Triangle {
+                v1: a,
+                v2: bt,
+                v3: at,
+            });
         }
     }
     Ok(mesh)
+}
+
+const CAP_ASPECT_LIMIT: f64 = 20.0;
+const CAP_SUBDIVISION_DEPTH: u8 = 4;
+const COLLINEAR_REPAIR_EPSILON: f64 = 1e-7;
+
+fn repair_collinear_triangle(mesh: &mut Mesh, base: u32, total: u32, tri: [usize; 3]) {
+    let top = tri.map(|index| base + total + index as u32);
+    let bottom = [
+        base + tri[2] as u32,
+        base + tri[1] as u32,
+        base + tri[0] as u32,
+    ];
+    repair_degenerate_cap(mesh, top, bottom);
+}
+
+fn repair_degenerate_cap(mesh: &mut Mesh, top: [u32; 3], bottom: [u32; 3]) {
+    let points = top.map(|index| mesh.vertices[index as usize]);
+    let mut middle = 0;
+    let mut best = f64::INFINITY;
+    let distance = |a: Vertex, b: Vertex| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+    for i in 0..3 {
+        let j = (i + 1) % 3;
+        let k = (i + 2) % 3;
+        let score = (distance(points[i], points[j]) + distance(points[i], points[k])
+            - distance(points[j], points[k]))
+        .abs();
+        if score < best {
+            best = score;
+            middle = i;
+        }
+    }
+    let j = (middle + 1) % 3;
+    let k = (middle + 2) % 3;
+    let dx = points[k].x - points[j].x;
+    let dy = points[k].y - points[j].y;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= 1e-12 {
+        return;
+    }
+    let nx = -dy / length * COLLINEAR_REPAIR_EPSILON;
+    let ny = dx / length * COLLINEAR_REPAIR_EPSILON;
+    let corresponding_bottom = bottom[2 - middle];
+    for vertex in [top[middle], corresponding_bottom] {
+        mesh.vertices[vertex as usize].x += nx;
+        mesh.vertices[vertex as usize].y += ny;
+    }
+}
+
+fn subdivide_cap_triangle(mesh: &mut Mesh, top: [u32; 3], bottom: [u32; 3], depth: u8) {
+    let mut pa = mesh.vertices[top[0] as usize];
+    let mut pb = mesh.vertices[top[1] as usize];
+    let mut pc = mesh.vertices[top[2] as usize];
+    if triangle_area2(pa, pb, pc).abs() <= 1e-10 {
+        repair_degenerate_cap(mesh, top, bottom);
+        pa = mesh.vertices[top[0] as usize];
+        pb = mesh.vertices[top[1] as usize];
+        pc = mesh.vertices[top[2] as usize];
+    }
+    let aspect = triangle_aspect(pa, pb, pc);
+    if aspect > CAP_ASPECT_LIMIT && depth < CAP_SUBDIVISION_DEPTH {
+        let center = Vertex {
+            x: (pa.x + pb.x + pc.x) / 3.0,
+            y: (pa.y + pb.y + pc.y) / 3.0,
+            z: pa.z,
+        };
+        let center_bottom = mesh.vertices.len() as u32;
+        mesh.vertices.push(Vertex {
+            z: mesh.vertices[bottom[0] as usize].z,
+            ..center
+        });
+        let center_top = mesh.vertices.len() as u32;
+        mesh.vertices.push(Vertex { z: pa.z, ..center });
+        let can_subdivide = [
+            [top[0], top[1], center_top],
+            [top[1], top[2], center_top],
+            [top[2], top[0], center_top],
+        ]
+        .into_iter()
+        .all(|triangle| {
+            let a = mesh.vertices[triangle[0] as usize];
+            let b = mesh.vertices[triangle[1] as usize];
+            let c = mesh.vertices[triangle[2] as usize];
+            triangle_area2(a, b, c).abs() > 1e-10
+        });
+        if !can_subdivide {
+            mesh.vertices.truncate(center_bottom as usize);
+            mesh.triangles.push(Triangle {
+                v1: top[0],
+                v2: top[1],
+                v3: top[2],
+            });
+            mesh.triangles.push(Triangle {
+                v1: bottom[0],
+                v2: bottom[1],
+                v3: bottom[2],
+            });
+            return;
+        }
+        subdivide_cap_triangle(
+            mesh,
+            [top[0], top[1], center_top],
+            [center_bottom, bottom[1], bottom[2]],
+            depth + 1,
+        );
+        subdivide_cap_triangle(
+            mesh,
+            [top[1], top[2], center_top],
+            [center_bottom, bottom[0], bottom[1]],
+            depth + 1,
+        );
+        subdivide_cap_triangle(
+            mesh,
+            [top[2], top[0], center_top],
+            [center_bottom, bottom[2], bottom[0]],
+            depth + 1,
+        );
+    } else {
+        mesh.triangles.push(Triangle {
+            v1: top[0],
+            v2: top[1],
+            v3: top[2],
+        });
+        mesh.triangles.push(Triangle {
+            v1: bottom[0],
+            v2: bottom[1],
+            v3: bottom[2],
+        });
+    }
+}
+
+fn triangle_aspect(a: Vertex, b: Vertex, c: Vertex) -> f64 {
+    let ab = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+    let bc = ((b.x - c.x).powi(2) + (b.y - c.y).powi(2)).sqrt();
+    let ca = ((c.x - a.x).powi(2) + (c.y - a.y).powi(2)).sqrt();
+    let shortest = ab.min(bc).min(ca);
+    if shortest <= 1e-12 {
+        f64::INFINITY
+    } else {
+        ab.max(bc).max(ca) / shortest
+    }
+}
+
+fn triangle_area2(a: Vertex, b: Vertex, c: Vertex) -> f64 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
 
 pub fn bounds(parts: &[Part]) -> (f64, f64) {
@@ -288,7 +458,10 @@ pub fn validate_parts(parts: &[Part]) -> Result<()> {
         if part.mesh.vertices.is_empty() || part.mesh.triangles.is_empty() {
             return Err(anyhow!("part {} has empty mesh", part.name));
         }
-        for t in &part.mesh.triangles {
+        let mut edges: HashMap<(u32, u32), usize> = HashMap::new();
+        let mut edge_triangles: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        let mut signed_volume = 0.0;
+        for (ti, t) in part.mesh.triangles.iter().enumerate() {
             if t.v1 as usize >= part.mesh.vertices.len()
                 || t.v2 as usize >= part.mesh.vertices.len()
                 || t.v3 as usize >= part.mesh.vertices.len()
@@ -298,6 +471,60 @@ pub fn validate_parts(parts: &[Part]) -> Result<()> {
             if t.v1 == t.v2 || t.v2 == t.v3 || t.v1 == t.v3 {
                 return Err(anyhow!("part {} has a degenerate triangle", part.name));
             }
+            let a = part.mesh.vertices[t.v1 as usize];
+            let b = part.mesh.vertices[t.v2 as usize];
+            let c = part.mesh.vertices[t.v3 as usize];
+            let cross = (
+                (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y),
+                (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z),
+                (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x),
+            );
+            if cross.0 * cross.0 + cross.1 * cross.1 + cross.2 * cross.2 <= 1e-20 {
+                return Err(anyhow!(
+                    "part {} has a zero-area triangle ({}, {}, {})",
+                    part.name,
+                    t.v1,
+                    t.v2,
+                    t.v3
+                ));
+            }
+            for (u, v) in [(t.v1, t.v2), (t.v2, t.v3), (t.v3, t.v1)] {
+                *edges.entry((u.min(v), u.max(v))).or_default() += 1;
+                edge_triangles
+                    .entry((u.min(v), u.max(v)))
+                    .or_default()
+                    .push(ti);
+            }
+            signed_volume += (a.x * (b.y * c.z - b.z * c.y) - a.y * (b.x * c.z - b.z * c.x)
+                + a.z * (b.x * c.y - b.y * c.x))
+                / 6.0;
+        }
+        if edges.values().any(|count| *count != 2) {
+            let bad = edges.values().filter(|count| **count != 2).count();
+            let examples = edges
+                .iter()
+                .filter(|(_, count)| **count != 2)
+                .take(4)
+                .map(|((a, b), count)| format!("{}-{}:{}", a, b, count))
+                .collect::<Vec<_>>()
+                .join(",");
+            let edge_detail = edges
+                .iter()
+                .filter(|(_, count)| **count != 2)
+                .take(1)
+                .map(|(edge, _)| format!("{:?}", edge_triangles.get(edge).unwrap()))
+                .next()
+                .unwrap_or_default();
+            return Err(anyhow!(
+                "part {} is not a closed triangle shell ({} edges: {}; triangles {})",
+                part.name,
+                bad,
+                examples,
+                edge_detail
+            ));
+        }
+        if signed_volume.abs() <= 1e-9 {
+            return Err(anyhow!("part {} has zero volume", part.name));
         }
     }
     Ok(())
