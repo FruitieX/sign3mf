@@ -27,8 +27,10 @@ mesh; `--parts region` creates one part per disconnected region.
 
 The 3MF contains one parent component object and a build item referencing it.
 Each colour has a stable name such as `color_01_FFCC00` and a standard display
-colour. Display colours are metadata; assign filaments to the imported parts
-manually in Bambu Studio or OrcaSlicer after importing the assembled model.
+colour. It also includes `Metadata/model_settings.config`, which maps each
+distinct colour to a sequential Bambu/Orca extruder slot and keeps same-colour
+parts together. The actual filament loaded in each slot remains slicer
+configuration and should be checked after import.
 
 The default tracer is a shared-boundary pixel tracer so neighbouring regions
 reuse identical coordinates. The optional `vtracer-backend` feature pins

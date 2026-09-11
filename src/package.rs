@@ -20,13 +20,15 @@ pub fn write_3mf(path: &Path, parts: &[Part]) -> Result<()> {
     zip.write_all(root_rels().as_bytes())?;
     zip.start_file("3D/3dmodel.model", opts)?;
     zip.write_all(model_xml(parts).as_bytes())?;
+    zip.start_file("Metadata/model_settings.config", opts)?;
+    zip.write_all(model_settings_xml(parts).as_bytes())?;
     zip.finish()?;
     Ok(())
 }
 
 fn content_types() -> &'static str {
     r#"<?xml version="1.0" encoding="UTF-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>"#
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="config" ContentType="application/xml"/></Types>"#
 }
 fn root_rels() -> &'static str {
     r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -57,9 +59,10 @@ fn model_xml(parts: &[Part]) -> String {
     for (i, p) in parts.iter().enumerate() {
         let id = i + 2;
         out.push_str(&format!(
-            r#"<object id="{}" type="model" name="{}"><mesh><vertices>"#,
+            r#"<object id="{}" type="model" name="{}" pid="1" pindex="{}"><mesh><vertices>"#,
             id,
-            esc(&p.name)
+            esc(&p.name),
+            i
         ));
         for v in &p.mesh.vertices {
             out.push_str(&format!(
@@ -84,6 +87,42 @@ fn model_xml(parts: &[Part]) -> String {
     out
 }
 
+fn model_settings_xml(parts: &[Part]) -> String {
+    let mut colors = Vec::new();
+    let mut extruders = Vec::with_capacity(parts.len());
+    for part in parts {
+        let index = colors
+            .iter()
+            .position(|color| *color == part.color)
+            .unwrap_or_else(|| {
+                colors.push(part.color);
+                colors.len() - 1
+            });
+        extruders.push(index + 1);
+    }
+
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><config><object id=\"1\"><metadata key=\"name\" value=\"sign3d\"/>",
+    );
+    for (i, part) in parts.iter().enumerate() {
+        out.push_str(&format!(
+            "<part id=\"{}\" subtype=\"normal_part\"><metadata key=\"name\" value=\"{}\"/><metadata key=\"extruder\" value=\"{}\"/></part>",
+            i + 2,
+            esc(&part.name),
+            extruders[i]
+        ));
+    }
+    out.push_str("</object><plate><metadata key=\"plater_id\" value=\"1\"/><metadata key=\"filament_map_mode\" value=\"Auto For Flush\"/><metadata key=\"filament_maps\" value=\"");
+    for (i, extruder) in extruders.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&extruder.to_string());
+    }
+    out.push_str("\"/><model_instance><metadata key=\"object_id\" value=\"1\"/><metadata key=\"instance_id\" value=\"0\"/></model_instance></plate></config>");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +130,42 @@ mod tests {
     fn xml_has_required_parts() {
         assert!(content_types().contains("3dmodel"));
         assert!(root_rels().contains("3dmodel.model"));
+    }
+
+    #[test]
+    fn model_materials_and_slicer_assignments_are_distinct() {
+        let parts = vec![
+            Part {
+                name: "backing_0000FF".into(),
+                color: crate::Rgb(0, 0, 255),
+                mesh: crate::Mesh::default(),
+                is_backing: true,
+                region_index: 0,
+            },
+            Part {
+                name: "color_01_0000FF".into(),
+                color: crate::Rgb(0, 0, 255),
+                mesh: crate::Mesh::default(),
+                is_backing: false,
+                region_index: 0,
+            },
+            Part {
+                name: "color_02_FFFFFF".into(),
+                color: crate::Rgb(255, 255, 255),
+                mesh: crate::Mesh::default(),
+                is_backing: false,
+                region_index: 1,
+            },
+        ];
+        let config = model_settings_xml(&parts);
+        assert!(
+            config.contains("<part id=\"2\" subtype=\"normal_part\">")
+                && config.contains("<metadata key=\"extruder\" value=\"1\"/>")
+        );
+        assert!(
+            config.contains("<part id=\"4\" subtype=\"normal_part\">")
+                && config.contains("<metadata key=\"extruder\" value=\"2\"/>")
+        );
     }
 
     #[cfg(feature = "lib3mf-backend")]
