@@ -45,9 +45,13 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
     } else {
         requested / source_h
     };
+    let model_width = source_w * scale;
     let transform = |p: Point| {
-        let x = (p.x - raw_bounds.0) * scale;
+        let mut x = (p.x - raw_bounds.0) * scale;
         let y = (p.y - raw_bounds.1) * scale;
+        if config.upside_down {
+            x = model_width - x;
+        }
         Point::new(x, y)
     };
     let normalize_groups = |cs: &[Contour]| -> Vec<(Contour, Vec<Contour>)> {

@@ -17,8 +17,8 @@ sign3d --input warning.jpg --output warning.3mf --height 120 --mode backed --fac
 Exactly one of `--width` and `--height` is required; both are measured in mm.
 The other dimension is derived from the processed artwork bounds. Defaults are
 2 colors, 3 mm total thickness, backed mode with a 1 mm face, face-down
-orientation, and 4× upscaling. Use `--orientation right-side-up` to keep the
-face on top of the build plate.
+orientation (a 180° rotation around Y), and 4× upscaling. Use `--orientation
+right-side-up` to keep the face on top of the build plate.
 `--mode full-depth` gives every
 colour the full requested thickness. `--mode backed` creates a separately
 named backing from the visible artwork and puts each colour in the remaining
