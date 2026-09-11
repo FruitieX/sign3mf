@@ -45,8 +45,17 @@ pub fn build_parts(traced: &Traced, config: &Config) -> Result<Vec<Part>> {
     } else {
         requested / source_h
     };
-    let transform =
-        |p: Point| Point::new((p.x - raw_bounds.0) * scale, (p.y - raw_bounds.1) * scale);
+    let model_width = source_w * scale;
+    let model_height = source_h * scale;
+    let transform = |p: Point| {
+        let x = (p.x - raw_bounds.0) * scale;
+        let y = (p.y - raw_bounds.1) * scale;
+        if config.upside_down {
+            Point::new(model_width - x, model_height - y)
+        } else {
+            Point::new(x, y)
+        }
+    };
     let normalize_groups = |cs: &[Contour]| -> Vec<(Contour, Vec<Contour>)> {
         group_contours(cs)
             .into_iter()
@@ -257,17 +266,31 @@ fn extrude_groups(groups: &[(Contour, Vec<Contour>)], z0: f64, z1: f64) -> Resul
             }
         }
         let total = count as u32;
-        for tri in &raw_indices {
-            let cross = triangle_area2(
-                mesh.vertices[base as usize + tri[0]],
-                mesh.vertices[base as usize + tri[1]],
-                mesh.vertices[base as usize + tri[2]],
-            );
-            if cross.abs() <= 1e-10 {
-                repair_collinear_triangle(&mut mesh, base, total, *tri);
+        for _ in 0..64 {
+            let mut repaired = false;
+            for tri in &raw_indices {
+                let top = [
+                    base + total + tri[0] as u32,
+                    base + total + tri[1] as u32,
+                    base + total + tri[2] as u32,
+                ];
+                let bottom = [
+                    base + tri[2] as u32,
+                    base + tri[1] as u32,
+                    base + tri[0] as u32,
+                ];
+                let points = top.map(|index| mesh.vertices[index as usize]);
+                if triangle_area2(points[0], points[1], points[2]).abs()
+                    <= DEGENERATE_AREA2_THRESHOLD
+                {
+                    repair_degenerate_cap(&mut mesh, top, bottom);
+                    repaired = true;
+                }
+            }
+            if !repaired {
+                break;
             }
         }
-
         for [a, b, c] in raw_indices {
             let a = base + a as u32;
             let b = base + b as u32;
@@ -298,17 +321,8 @@ fn extrude_groups(groups: &[(Contour, Vec<Contour>)], z0: f64, z1: f64) -> Resul
 
 const CAP_ASPECT_LIMIT: f64 = 20.0;
 const CAP_SUBDIVISION_DEPTH: u8 = 4;
-const COLLINEAR_REPAIR_EPSILON: f64 = 1e-7;
-
-fn repair_collinear_triangle(mesh: &mut Mesh, base: u32, total: u32, tri: [usize; 3]) {
-    let top = tri.map(|index| base + total + index as u32);
-    let bottom = [
-        base + tri[2] as u32,
-        base + tri[1] as u32,
-        base + tri[0] as u32,
-    ];
-    repair_degenerate_cap(mesh, top, bottom);
-}
+const COLLINEAR_REPAIR_EPSILON: f64 = 1e-6;
+const DEGENERATE_AREA2_THRESHOLD: f64 = 1e-8;
 
 fn repair_degenerate_cap(mesh: &mut Mesh, top: [u32; 3], bottom: [u32; 3]) {
     let points = top.map(|index| mesh.vertices[index as usize]);
@@ -344,15 +358,9 @@ fn repair_degenerate_cap(mesh: &mut Mesh, top: [u32; 3], bottom: [u32; 3]) {
 }
 
 fn subdivide_cap_triangle(mesh: &mut Mesh, top: [u32; 3], bottom: [u32; 3], depth: u8) {
-    let mut pa = mesh.vertices[top[0] as usize];
-    let mut pb = mesh.vertices[top[1] as usize];
-    let mut pc = mesh.vertices[top[2] as usize];
-    if triangle_area2(pa, pb, pc).abs() <= 1e-10 {
-        repair_degenerate_cap(mesh, top, bottom);
-        pa = mesh.vertices[top[0] as usize];
-        pb = mesh.vertices[top[1] as usize];
-        pc = mesh.vertices[top[2] as usize];
-    }
+    let pa = mesh.vertices[top[0] as usize];
+    let pb = mesh.vertices[top[1] as usize];
+    let pc = mesh.vertices[top[2] as usize];
     let aspect = triangle_aspect(pa, pb, pc);
     if aspect > CAP_ASPECT_LIMIT && depth < CAP_SUBDIVISION_DEPTH {
         let center = Vertex {
@@ -377,7 +385,7 @@ fn subdivide_cap_triangle(mesh: &mut Mesh, top: [u32; 3], bottom: [u32; 3], dept
             let a = mesh.vertices[triangle[0] as usize];
             let b = mesh.vertices[triangle[1] as usize];
             let c = mesh.vertices[triangle[2] as usize];
-            triangle_area2(a, b, c).abs() > 1e-10
+            triangle_area2(a, b, c).abs() > DEGENERATE_AREA2_THRESHOLD
         });
         if !can_subdivide {
             mesh.vertices.truncate(center_bottom as usize);

@@ -46,6 +46,7 @@ pub struct Config {
     pub colors: usize,
     pub palette: Option<Vec<Rgb>>,
     pub mode: Mode,
+    pub upside_down: bool,
     pub face_depth: f64,
     pub backing_color: Option<Rgb>,
     pub upscale: u32,
@@ -72,12 +73,13 @@ impl Default for Config {
             width: None,
             height: None,
             thickness: 3.0,
-            colors: 4,
+            colors: 2,
             palette: None,
-            mode: Mode::FullDepth,
-            face_depth: 0.6,
+            mode: Mode::Backed,
+            upside_down: true,
+            face_depth: 1.0,
             backing_color: None,
-            upscale: 1,
+            upscale: 4,
             filter: Filter::Cubic,
             trace_mode: TraceMode::Spline,
             simplify: 0.0,
@@ -191,11 +193,6 @@ fn validate_config(c: &Config) -> Result<()> {
     }
     if c.colors == 0 {
         return Err(anyhow!("--colors must be at least 1"));
-    }
-    if c.palette.is_some() && c.colors != 4 {
-        return Err(anyhow!(
-            "--palette conflicts with an explicit --colors value"
-        ));
     }
     if let Some(p) = &c.palette {
         if p.is_empty() {

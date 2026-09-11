@@ -1,8 +1,8 @@
 # sign3d
 
 `sign3d` converts prepared PNG, JPEG, WebP, BMP, or TIFF artwork into a flat,
-multipart 3MF sign. The library and command line program use millimetres for
-all physical dimensions. Transparent pixels are outside the sign; a requested
+multipart 3MF sign. The library and command line program use millimetres (mm)
+for all physical dimensions. Transparent pixels are outside the sign; a requested
 background colour is flood-filled from the image border, so enclosed artwork of
 the same colour remains intact.
 
@@ -10,15 +10,19 @@ Build and run from this directory:
 
 ```text
 cargo build --release
-sign3d --input warning.png --output warning.3mf --colors 4 --width 150 --thickness 3
-sign3d --input warning.jpg --output warning.3mf --height 120 --thickness 3 --mode backed --face-depth 0.6 --remove-background '#FFFFFF' --background-tolerance 20 --trim --upscale 2 --filter cubic --svg-out warning.svg
+sign3d --input warning.png --output warning.3mf --width 150
+sign3d --input warning.jpg --output warning.3mf --height 120 --mode backed --face-depth 1.0 --remove-background '#FFFFFF' --background-tolerance 20 --trim --upscale 4 --filter cubic --svg-out warning.svg
 ```
 
-Exactly one of `--width` and `--height` is required. The other dimension is
-derived from the processed artwork bounds. `--mode full-depth` gives every
+Exactly one of `--width` and `--height` is required; both are measured in mm.
+The other dimension is derived from the processed artwork bounds. Defaults are
+2 colors, 3 mm total thickness, backed mode with a 1 mm face, upside-down
+orientation, and 4× upscaling. Use `--orientation right-side-up` to keep the
+normal orientation.
+`--mode full-depth` gives every
 colour the full requested thickness. `--mode backed` creates a separately
 named backing from the visible artwork and puts each colour in the remaining
-face depth. `--parts color` groups disconnected shells of one colour into one
+face depth in mm. `--parts color` groups disconnected shells of one colour into one
 mesh; `--parts region` creates one part per disconnected region.
 
 The 3MF contains one parent component object and a build item referencing it.

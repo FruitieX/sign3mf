@@ -17,33 +17,66 @@ struct Args {
     input: PathBuf,
     #[arg(long)]
     output: PathBuf,
-    #[arg(long, conflicts_with = "height")]
+    #[arg(
+        long,
+        conflicts_with = "height",
+        help = "Final sign width in millimetres (mm). Exactly one of --width or --height is required."
+    )]
     width: Option<f64>,
-    #[arg(long, conflicts_with = "width")]
+    #[arg(
+        long,
+        conflicts_with = "width",
+        help = "Final sign height in millimetres (mm). Exactly one of --width or --height is required."
+    )]
     height: Option<f64>,
-    #[arg(long, default_value_t = 3.0)]
+    #[arg(
+        long,
+        default_value_t = 3.0,
+        help = "Total sign thickness in millimetres (mm)."
+    )]
     thickness: f64,
-    #[arg(long)]
+    #[arg(long, help = "Maximum number of artwork colors. Default: 2.")]
     colors: Option<usize>,
     #[arg(long)]
     palette: Option<String>,
-    #[arg(long, value_enum, default_value_t=ModeArg::FullDepth)]
+    #[arg(long, value_enum, default_value_t=ModeArg::Backed, help = "Geometry mode: backed uses a backing layer plus a colored face; full-depth extrudes each color through the full thickness.")]
     mode: ModeArg,
-    #[arg(long, default_value_t = 0.6)]
+    #[arg(long, value_enum, default_value_t = OrientationArg::UpsideDown, help = "Planar sign orientation. Default: upside-down.")]
+    orientation: OrientationArg,
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Colored face depth in millimetres (mm) for backed mode."
+    )]
     face_depth: f64,
     #[arg(long)]
     backing_color: Option<String>,
-    #[arg(long, default_value_t = 1)]
+    #[arg(
+        long,
+        default_value_t = 4,
+        help = "Bitmap upscaling factor before tracing. Default: 4."
+    )]
     upscale: u32,
     #[arg(long, value_enum, default_value_t=FilterArg::Cubic)]
     filter: FilterArg,
     #[arg(long, value_enum, default_value_t=TraceArg::Spline)]
     trace_mode: TraceArg,
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        help = "Shared-boundary simplification tolerance in millimetres (mm)."
+    )]
     simplify: f64,
-    #[arg(long, default_value_t = 0.05)]
+    #[arg(
+        long,
+        default_value_t = 0.05,
+        help = "Curve flattening tolerance in millimetres (mm)."
+    )]
     curve_tolerance: f64,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Remove color regions smaller than this area in square millimetres (mm²)."
+    )]
     speckle_area: Option<f64>,
     #[arg(long)]
     remove_background: Option<String>,
@@ -67,6 +100,11 @@ struct Args {
 enum ModeArg {
     FullDepth,
     Backed,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OrientationArg {
+    UpsideDown,
+    RightSideUp,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum FilterArg {
@@ -100,12 +138,13 @@ fn main() -> Result<()> {
         width: args.width,
         height: args.height,
         thickness: args.thickness,
-        colors: args.colors.unwrap_or(4),
+        colors: args.colors.unwrap_or(2),
         palette: args.palette.as_deref().map(parse_palette).transpose()?,
         mode: match args.mode {
             ModeArg::FullDepth => Mode::FullDepth,
             ModeArg::Backed => Mode::Backed,
         },
+        upside_down: matches!(args.orientation, OrientationArg::UpsideDown),
         face_depth: args.face_depth,
         backing_color: args.backing_color.as_deref().map(parse_hex).transpose()?,
         upscale: args.upscale,
