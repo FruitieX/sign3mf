@@ -1,6 +1,7 @@
 /target/
 *.3mf
 *.svg
+!sign3mf-logo.svg
 *.png
 *.jpg
 *.jpeg

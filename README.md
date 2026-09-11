@@ -1,5 +1,9 @@
 # sign3mf
 
+<p align="center">
+  <img src="sign3mf-logo.svg" alt="sign3mf logo" width="220">
+</p>
+
 `sign3mf` converts prepared PNG, JPEG, WebP, BMP, or TIFF artwork into a flat,
 multipart 3MF sign. The library and command line program use millimetres (mm)
 for all physical dimensions. Transparent pixels are outside the sign; a requested
