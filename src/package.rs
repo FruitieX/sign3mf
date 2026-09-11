@@ -113,8 +113,8 @@ fn model_settings_xml(parts: &[Part]) -> String {
         ));
     }
     out.push_str("</object><plate><metadata key=\"plater_id\" value=\"1\"/><metadata key=\"filament_map_mode\" value=\"Auto For Flush\"/><metadata key=\"filament_maps\" value=\"");
-    for (i, extruder) in extruders.iter().enumerate() {
-        if i > 0 {
+    for extruder in 1..=colors.len() {
+        if extruder > 1 {
             out.push(' ');
         }
         out.push_str(&extruder.to_string());
@@ -166,6 +166,7 @@ mod tests {
             config.contains("<part id=\"4\" subtype=\"normal_part\">")
                 && config.contains("<metadata key=\"extruder\" value=\"2\"/>")
         );
+        assert!(config.contains("key=\"filament_maps\" value=\"1 2\""));
     }
 
     #[cfg(feature = "lib3mf-backend")]
