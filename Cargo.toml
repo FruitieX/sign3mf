@@ -1,0 +1,34 @@
+[package]
+name = "sign3d"
+version = "0.1.0"
+edition = "2021"
+description = "Convert bitmap artwork into multipart printable 3MF signs"
+license = "MIT"
+
+[lib]
+name = "sign3d"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sign3d"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+earcutr = "0.4"
+i_overlay = "8.1"
+image = { version = "0.25", default-features = true }
+thiserror = "1"
+quick-xml = "0.37"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+vtracer = { version = "=1.0.0-alpha.4", optional = true }
+lib3mf = { version = "0.1", optional = true }
+
+[features]
+default = []
+vtracer-backend = ["dep:vtracer"]
+lib3mf-backend = ["dep:lib3mf"]
+
+[dev-dependencies]
+tempfile = "3"

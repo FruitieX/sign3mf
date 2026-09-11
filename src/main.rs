@@ -1,0 +1,161 @@
+use anyhow::{anyhow, Result};
+use clap::{Parser, ValueEnum};
+use sign3d::{
+    color::parse_hex, color::parse_palette, convert_and_write, Config, Filter, Mode, PartsMode,
+    TraceMode,
+};
+use std::path::PathBuf;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "sign3d",
+    version,
+    about = "Convert bitmap artwork into a multipart printable 3MF sign"
+)]
+struct Args {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long, conflicts_with = "height")]
+    width: Option<f64>,
+    #[arg(long, conflicts_with = "width")]
+    height: Option<f64>,
+    #[arg(long, default_value_t = 3.0)]
+    thickness: f64,
+    #[arg(long)]
+    colors: Option<usize>,
+    #[arg(long)]
+    palette: Option<String>,
+    #[arg(long, value_enum, default_value_t=ModeArg::FullDepth)]
+    mode: ModeArg,
+    #[arg(long, default_value_t = 0.6)]
+    face_depth: f64,
+    #[arg(long)]
+    backing_color: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    upscale: u32,
+    #[arg(long, value_enum, default_value_t=FilterArg::Cubic)]
+    filter: FilterArg,
+    #[arg(long, value_enum, default_value_t=TraceArg::Spline)]
+    trace_mode: TraceArg,
+    #[arg(long, default_value_t = 0.0)]
+    simplify: f64,
+    #[arg(long, default_value_t = 0.05)]
+    curve_tolerance: f64,
+    #[arg(long)]
+    speckle_area: Option<f64>,
+    #[arg(long)]
+    remove_background: Option<String>,
+    #[arg(long, default_value_t = 20)]
+    background_tolerance: u8,
+    #[arg(long, default_value_t = 128)]
+    alpha_threshold: u8,
+    #[arg(long)]
+    trim: bool,
+    #[arg(long, value_enum, default_value_t=PartsArg::Color)]
+    parts: PartsArg,
+    #[arg(long)]
+    svg_out: Option<PathBuf>,
+    #[arg(long)]
+    preview_out: Option<PathBuf>,
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ModeArg {
+    FullDepth,
+    Backed,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum FilterArg {
+    Nearest,
+    Cubic,
+    Lanczos,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TraceArg {
+    Pixel,
+    Polygon,
+    Spline,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PartsArg {
+    Color,
+    Region,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    if args.width.is_none() && args.height.is_none() {
+        return Err(anyhow!("provide exactly one of --width or --height"));
+    }
+    if args.colors.is_some() && args.palette.is_some() {
+        return Err(anyhow!("--palette conflicts with --colors"));
+    }
+    let config = Config {
+        input: args.input,
+        output: args.output,
+        width: args.width,
+        height: args.height,
+        thickness: args.thickness,
+        colors: args.colors.unwrap_or(4),
+        palette: args.palette.as_deref().map(parse_palette).transpose()?,
+        mode: match args.mode {
+            ModeArg::FullDepth => Mode::FullDepth,
+            ModeArg::Backed => Mode::Backed,
+        },
+        face_depth: args.face_depth,
+        backing_color: args.backing_color.as_deref().map(parse_hex).transpose()?,
+        upscale: args.upscale,
+        filter: match args.filter {
+            FilterArg::Nearest => Filter::Nearest,
+            FilterArg::Cubic => Filter::Cubic,
+            FilterArg::Lanczos => Filter::Lanczos,
+        },
+        trace_mode: match args.trace_mode {
+            TraceArg::Pixel => TraceMode::Pixel,
+            TraceArg::Polygon => TraceMode::Polygon,
+            TraceArg::Spline => TraceMode::Spline,
+        },
+        simplify: args.simplify,
+        curve_tolerance: args.curve_tolerance,
+        speckle_area: args.speckle_area,
+        remove_background: args
+            .remove_background
+            .as_deref()
+            .map(parse_hex)
+            .transpose()?,
+        background_tolerance: args.background_tolerance,
+        alpha_threshold: args.alpha_threshold,
+        trim: args.trim,
+        parts: match args.parts {
+            PartsArg::Color => PartsMode::Color,
+            PartsArg::Region => PartsMode::Region,
+        },
+        svg_out: args.svg_out,
+        preview_out: args.preview_out,
+        force: args.force,
+    };
+    let report = convert_and_write(&config)?;
+    println!(
+        "wrote {:.2} × {:.2} mm; {} colors, {} parts, {} triangles; {} disconnected piece(s)",
+        report.width,
+        report.height,
+        report.palette.len(),
+        report.parts,
+        report.triangles,
+        report.disconnected_pieces
+    );
+    println!(
+        "palette: {}",
+        report
+            .palette
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
+}

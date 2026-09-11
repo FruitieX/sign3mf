@@ -1,0 +1,10 @@
+/target/
+*.3mf
+*.svg
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.tif
+*.tiff
